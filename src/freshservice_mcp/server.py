@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 # Create MCP INSTANCE
-mcp = FastMCP("freshservice_mcp")
+mcp = FastMCP("freshservice_mcp_managed")
 
 
 # API CREDENTIALS
@@ -164,8 +164,167 @@ def parse_link_header(link_header: str) -> Dict[str, Optional[int]]:
 
     return pagination
 
+
+# === TOOL ALLOWLISTS ===
+# This fork uses three sets to control which tools are exposed to MCP clients.
+# The decorator checks READONLY_TOOLS and ALLOWED_WRITE_TOOLS — any tool not
+# in either set is silently skipped (code preserved for upstream merge compatibility).
+#
+# To enable a write tool: move it from DISABLED_WRITE_TOOLS to ALLOWED_WRITE_TOOLS.
+# Also update the Freshservice API key's RBAC role to permit that action.
+
+READONLY_TOOLS = {
+    # Tickets
+    "get_ticket_fields",
+    "get_tickets",
+    "filter_tickets",
+    "get_ticket_by_id",
+    # Ticket Conversations
+    "list_all_ticket_conversation",
+    # Service Catalog
+    "list_service_items",
+    "get_requested_items",
+    # Changes - Core
+    "get_changes",
+    "filter_changes",
+    "get_change_by_id",
+    "list_change_fields",
+    # Changes - Approvals
+    "list_change_approval_groups",
+    "view_change_approval",
+    "list_change_approvals",
+    # Changes - Notes
+    "view_change_note",
+    "list_change_notes",
+    # Changes - Tasks
+    "view_change_task",
+    "get_change_tasks",
+    # Changes - Time Entries
+    "view_change_time_entry",
+    "list_change_time_entries",
+    # Products
+    "get_all_products",
+    "get_products_by_id",
+    # Requesters
+    "get_all_requesters",
+    "get_requester_id",
+    "list_all_requester_fields",
+    "filter_requesters",
+    # Agents
+    "get_agent",
+    "get_all_agents",
+    "get_agent_fields",
+    "filter_agents",
+    # Agent Groups
+    "get_all_agent_groups",
+    "getAgentGroupById",
+    # Requester Groups
+    "get_all_requester_groups",
+    "get_requester_groups_by_id",
+    "list_requester_group_members",
+    # Canned Responses
+    "get_all_canned_response",
+    "get_canned_response",
+    "list_all_canned_response_folder",
+    "list_canned_response_folder",
+    # Solution Categories
+    "get_all_solution_category",
+    "get_solution_category",
+    # Solution Folders
+    "get_list_of_solution_folder",
+    "get_solution_folder",
+    # Solution Articles
+    "get_list_of_solution_article",
+    "get_solution_article",
+    # Workspaces
+    "list_all_workspaces",
+    "get_workspace",
+}
+
+ALLOWED_WRITE_TOOLS = set()
+# Move tools here from DISABLED_WRITE_TOOLS when ready to enable them.
+# Also update the Freshservice API key's RBAC role to permit the action.
+# Example: ALLOWED_WRITE_TOOLS = {"send_ticket_reply", "create_ticket_note"}
+
+DISABLED_WRITE_TOOLS = {
+    # Tickets
+    "create_ticket",
+    "update_ticket",
+    "delete_ticket",
+    # Ticket Conversations
+    "send_ticket_reply",
+    "create_ticket_note",
+    "update_ticket_conversation",
+    # Service Catalog
+    "create_service_request",
+    # Changes - Core
+    "create_change",
+    "update_change",
+    "close_change",
+    "delete_change",
+    "move_change",
+    # Changes - Approvals
+    "create_change_approval_group",
+    "update_change_approval_group",
+    "cancel_change_approval_group",
+    "update_approval_chain_rule_change",
+    "send_change_approval_reminder",
+    "cancel_change_approval",
+    # Changes - Notes
+    "create_change_note",
+    "update_change_note",
+    "delete_change_note",
+    # Changes - Tasks
+    "create_change_task",
+    "update_change_task",
+    "delete_change_task",
+    # Changes - Time Entries
+    "create_change_time_entry",
+    "update_change_time_entry",
+    "delete_change_time_entry",
+    # Products
+    "create_product",
+    "update_product",
+    # Requesters
+    "create_requester",
+    "update_requester",
+    "add_requester_to_group",
+    # Agents
+    "create_agent",
+    "update_agent",
+    # Agent Groups
+    "create_group",
+    "update_group",
+    # Requester Groups
+    "create_requester_group",
+    "update_requester_group",
+    # Solution Categories
+    "create_solution_category",
+    "update_solution_category",
+    # Solution Folders
+    "create_solution_folder",
+    "update_solution_folder",
+    # Solution Articles
+    "create_solution_article",
+    "update_solution_article",
+    "publish_solution_article",
+}
+
+# Combined set used by the decorator
+_ACTIVE_TOOLS = READONLY_TOOLS | ALLOWED_WRITE_TOOLS
+
+
+def allowed_tool():
+    """Register a tool only if it's in READONLY_TOOLS or ALLOWED_WRITE_TOOLS."""
+    def decorator(func):
+        if func.__name__ in _ACTIVE_TOOLS:
+            return mcp.tool()(func)
+        return func
+    return decorator
+
+
 #GET TICKET FIELDS
-@mcp.tool()
+@allowed_tool()
 async def get_ticket_fields() -> Dict[str, Any]:
     """Get ticket fields from Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/ticket_form_fields"
@@ -175,7 +334,7 @@ async def get_ticket_fields() -> Dict[str, Any]:
         return response.json()
     
 #GET TICKETS
-@mcp.tool()
+@allowed_tool()
 async def get_tickets(page: Optional[int] = 1, per_page: Optional[int] = 30) -> Dict[str, Any]:
     """Get tickets from Freshservice with pagination support."""
     
@@ -220,7 +379,7 @@ async def get_tickets(page: Optional[int] = 1, per_page: Optional[int] = 30) -> 
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
 #CREATE TICKET 
-@mcp.tool()
+@allowed_tool()
 async def create_ticket(
     subject: str,
     description: str,
@@ -285,7 +444,7 @@ async def create_ticket(
             return f"Error: An unexpected error occurred - {str(e)}"
 
 #UPDATE TICKET
-@mcp.tool()
+@allowed_tool()
 async def update_ticket(ticket_id: int, ticket_fields: Dict[str, Any]) -> Dict[str, Any]:
     """Update a ticket in Freshservice."""
     if not ticket_fields:
@@ -334,7 +493,7 @@ async def update_ticket(ticket_id: int, ticket_fields: Dict[str, Any]) -> Dict[s
             }
             
 #FILTER TICKET 
-@mcp.tool()
+@allowed_tool()
 async def filter_tickets(query: str, page: int = 1, workspace_id: Optional[int] = None) -> Dict[str, Any]:
     """Filter the tickets in Freshservice.
 
@@ -366,7 +525,7 @@ async def filter_tickets(query: str, page: int = 1, workspace_id: Optional[int] 
                 return {"error": str(e), "raw_response": e.response.text}
         
 #DELETE TICKET.
-@mcp.tool()
+@allowed_tool()
 async def delete_ticket(ticket_id: int) -> str:
     """Delete a ticket in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}"
@@ -388,7 +547,7 @@ async def delete_ticket(ticket_id: int) -> str:
                 return "Error: Unexpected response format"
     
 #GET TICKET BY ID  
-@mcp.tool()
+@allowed_tool()
 async def get_ticket_by_id(ticket_id:int) -> Dict[str, Any]:
     """Get a ticket in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}"
@@ -399,7 +558,7 @@ async def get_ticket_by_id(ticket_id:int) -> Dict[str, Any]:
         return response.json()
     
 #GET ALL CHANGES
-@mcp.tool()
+@allowed_tool()
 async def get_changes(
     page: Optional[int] = 1, 
     per_page: Optional[int] = 30,
@@ -492,7 +651,7 @@ async def get_changes(
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
 #GET CHANGE BY ID
-@mcp.tool()
+@allowed_tool()
 async def get_change_by_id(change_id: int) -> Dict[str, Any]:
     """Get a specific change by ID in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}"
@@ -509,7 +668,7 @@ async def get_change_by_id(change_id: int) -> Dict[str, Any]:
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
 #CREATE CHANGE
-@mcp.tool()
+@allowed_tool()
 async def create_change(
     requester_id: int,
     subject: str,
@@ -613,7 +772,7 @@ async def create_change(
             return {"error": f"An unexpected error occurred - {str(e)}"}
 
 #UPDATE CHANGE
-@mcp.tool()
+@allowed_tool()
 async def update_change(change_id: int, change_fields: Dict[str, Any]) -> Dict[str, Any]:
     """Update an existing change in Freshservice. 
     
@@ -685,7 +844,7 @@ async def update_change(change_id: int, change_fields: Dict[str, Any]) -> Dict[s
             }
 
 #CLOSE CHANGE WITH RESULT
-@mcp.tool()
+@allowed_tool()
 async def close_change(
     change_id: int,
     change_result_explanation: str,
@@ -708,7 +867,7 @@ async def close_change(
     return await update_change(change_id, update_data)
 
 #DELETE CHANGE
-@mcp.tool()
+@allowed_tool()
 async def delete_change(change_id: int) -> str:
     """Delete a change in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}"
@@ -730,7 +889,7 @@ async def delete_change(change_id: int) -> str:
 
 
 # FILTER CHANGES
-@mcp.tool()
+@allowed_tool()
 async def filter_changes(
     query: str,
     page: int = 1,
@@ -772,7 +931,7 @@ async def filter_changes(
     )
 
 #GET CHANGE TASKS
-@mcp.tool()
+@allowed_tool()
 async def get_change_tasks(change_id: int) -> Dict[str, Any]:
     """Get all tasks associated with a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/tasks"
@@ -789,7 +948,7 @@ async def get_change_tasks(change_id: int) -> Dict[str, Any]:
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
 #CREATE CHANGE NOTE
-@mcp.tool()
+@allowed_tool()
 async def create_change_note(change_id: int, body: str) -> Dict[str, Any]:
     """Create a note for a change in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/notes"
@@ -810,7 +969,7 @@ async def create_change_note(change_id: int, body: str) -> Dict[str, Any]:
 # CHANGES APPROVAL ENDPOINTS
 
 #CREATE CHANGE APPROVAL GROUP
-@mcp.tool()
+@allowed_tool()
 async def create_change_approval_group(
     change_id: int,
     name: str,
@@ -845,7 +1004,7 @@ async def create_change_approval_group(
                 return {"error": str(e), "raw_response": e.response.text}
 
 #UPDATE CHANGE APPROVAL GROUP
-@mcp.tool()
+@allowed_tool()
 async def update_change_approval_group(
     change_id: int,
     group_id: int,
@@ -877,7 +1036,7 @@ async def update_change_approval_group(
                 return {"error": str(e), "raw_response": e.response.text}
 
 #CANCEL CHANGE APPROVAL GROUP
-@mcp.tool()
+@allowed_tool()
 async def cancel_change_approval_group(change_id: int, group_id: int) -> Dict[str, Any]:
     """Cancel a change approval group."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/approval_groups/{group_id}/cancel"
@@ -895,7 +1054,7 @@ async def cancel_change_approval_group(change_id: int, group_id: int) -> Dict[st
                 return {"error": str(e), "raw_response": e.response.text}
 
 #UPDATE APPROVAL CHAIN RULE FOR CHANGE
-@mcp.tool()
+@allowed_tool()
 async def update_approval_chain_rule_change(
     change_id: int,
     approval_chain_type: str = "parallel"
@@ -925,7 +1084,7 @@ async def update_approval_chain_rule_change(
                 return {"error": str(e), "raw_response": e.response.text}
 
 #LIST CHANGE APPROVAL GROUPS
-@mcp.tool()
+@allowed_tool()
 async def list_change_approval_groups(change_id: int) -> Dict[str, Any]:
     """List all approval groups within a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/approval_groups"
@@ -943,7 +1102,7 @@ async def list_change_approval_groups(change_id: int) -> Dict[str, Any]:
                 return {"error": str(e), "raw_response": e.response.text}
 
 #VIEW CHANGE APPROVAL
-@mcp.tool()
+@allowed_tool()
 async def view_change_approval(change_id: int, approval_id: int) -> Dict[str, Any]:
     """View a specific change approval."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/approvals/{approval_id}"
@@ -961,7 +1120,7 @@ async def view_change_approval(change_id: int, approval_id: int) -> Dict[str, An
                 return {"error": str(e), "raw_response": e.response.text}
 
 #LIST CHANGE APPROVALS
-@mcp.tool()
+@allowed_tool()
 async def list_change_approvals(change_id: int) -> Dict[str, Any]:
     """List all change approvals."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/approvals"
@@ -979,7 +1138,7 @@ async def list_change_approvals(change_id: int) -> Dict[str, Any]:
                 return {"error": str(e), "raw_response": e.response.text}
 
 #SEND CHANGE APPROVAL REMINDER
-@mcp.tool()
+@allowed_tool()
 async def send_change_approval_reminder(change_id: int, approval_id: int) -> Dict[str, Any]:
     """Send reminder for a change approval."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/approvals/{approval_id}/resend_approval"
@@ -997,7 +1156,7 @@ async def send_change_approval_reminder(change_id: int, approval_id: int) -> Dic
                 return {"error": str(e), "raw_response": e.response.text}
 
 #CANCEL CHANGE APPROVAL
-@mcp.tool()
+@allowed_tool()
 async def cancel_change_approval(change_id: int, approval_id: int) -> Dict[str, Any]:
     """Cancel a change approval."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/approvals/{approval_id}/cancel"
@@ -1017,7 +1176,7 @@ async def cancel_change_approval(change_id: int, approval_id: int) -> Dict[str, 
 # CHANGES NOTES ENDPOINTS
 
 #VIEW CHANGE NOTE
-@mcp.tool()
+@allowed_tool()
 async def view_change_note(change_id: int, note_id: int) -> Dict[str, Any]:
     """View a specific note for a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/notes/{note_id}"
@@ -1035,7 +1194,7 @@ async def view_change_note(change_id: int, note_id: int) -> Dict[str, Any]:
                 return {"error": str(e), "raw_response": e.response.text}
 
 #LIST CHANGE NOTES
-@mcp.tool()
+@allowed_tool()
 async def list_change_notes(change_id: int) -> Dict[str, Any]:
     """List all notes for a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/notes"
@@ -1053,7 +1212,7 @@ async def list_change_notes(change_id: int) -> Dict[str, Any]:
                 return {"error": str(e), "raw_response": e.response.text}
 
 #UPDATE CHANGE NOTE
-@mcp.tool()
+@allowed_tool()
 async def update_change_note(change_id: int, note_id: int, body: str) -> Dict[str, Any]:
     """Update a note for a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/notes/{note_id}"
@@ -1072,7 +1231,7 @@ async def update_change_note(change_id: int, note_id: int, body: str) -> Dict[st
                 return {"error": str(e), "raw_response": e.response.text}
 
 #DELETE CHANGE NOTE
-@mcp.tool()
+@allowed_tool()
 async def delete_change_note(change_id: int, note_id: int) -> Dict[str, Any]:
     """Delete a note for a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/notes/{note_id}"
@@ -1094,7 +1253,7 @@ async def delete_change_note(change_id: int, note_id: int) -> Dict[str, Any]:
 # CHANGES TASKS ENDPOINTS
 
 #CREATE CHANGE TASK
-@mcp.tool()
+@allowed_tool()
 async def create_change_task(
     change_id: int,
     title: str,
@@ -1135,7 +1294,7 @@ async def create_change_task(
                 return {"error": str(e), "raw_response": e.response.text}
 
 #VIEW CHANGE TASK
-@mcp.tool()
+@allowed_tool()
 async def view_change_task(change_id: int, task_id: int) -> Dict[str, Any]:
     """View a specific task for a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/tasks/{task_id}"
@@ -1153,7 +1312,7 @@ async def view_change_task(change_id: int, task_id: int) -> Dict[str, Any]:
                 return {"error": str(e), "raw_response": e.response.text}
 
 #UPDATE CHANGE TASK
-@mcp.tool()
+@allowed_tool()
 async def update_change_task(
     change_id: int,
     task_id: int,
@@ -1175,7 +1334,7 @@ async def update_change_task(
                 return {"error": str(e), "raw_response": e.response.text}
 
 #DELETE CHANGE TASK
-@mcp.tool()
+@allowed_tool()
 async def delete_change_task(change_id: int, task_id: int) -> Dict[str, Any]:
     """Delete a task for a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/tasks/{task_id}"
@@ -1197,7 +1356,7 @@ async def delete_change_task(change_id: int, task_id: int) -> Dict[str, Any]:
 # CHANGES TIME ENTRIES ENDPOINTS
 
 #CREATE CHANGE TIME ENTRY
-@mcp.tool()
+@allowed_tool()
 async def create_change_time_entry(
     change_id: int,
     time_spent: str,
@@ -1238,7 +1397,7 @@ async def create_change_time_entry(
                 return {"error": str(e), "raw_response": e.response.text}
 
 #VIEW CHANGE TIME ENTRY
-@mcp.tool()
+@allowed_tool()
 async def view_change_time_entry(change_id: int, time_entry_id: int) -> Dict[str, Any]:
     """View a specific time entry for a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/time_entries/{time_entry_id}"
@@ -1256,7 +1415,7 @@ async def view_change_time_entry(change_id: int, time_entry_id: int) -> Dict[str
                 return {"error": str(e), "raw_response": e.response.text}
 
 #LIST CHANGE TIME ENTRIES
-@mcp.tool()
+@allowed_tool()
 async def list_change_time_entries(change_id: int) -> Dict[str, Any]:
     """List all time entries for a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/time_entries"
@@ -1274,7 +1433,7 @@ async def list_change_time_entries(change_id: int) -> Dict[str, Any]:
                 return {"error": str(e), "raw_response": e.response.text}
 
 #UPDATE CHANGE TIME ENTRY
-@mcp.tool()
+@allowed_tool()
 async def update_change_time_entry(
     change_id: int,
     time_entry_id: int,
@@ -1303,7 +1462,7 @@ async def update_change_time_entry(
                 return {"error": str(e), "raw_response": e.response.text}
 
 #DELETE CHANGE TIME ENTRY
-@mcp.tool()
+@allowed_tool()
 async def delete_change_time_entry(change_id: int, time_entry_id: int) -> Dict[str, Any]:
     """Delete a time entry for a change."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/time_entries/{time_entry_id}"
@@ -1325,7 +1484,7 @@ async def delete_change_time_entry(change_id: int, time_entry_id: int) -> Dict[s
 # OTHER CHANGES ENDPOINTS
 
 #MOVE CHANGE
-@mcp.tool()
+@allowed_tool()
 async def move_change(change_id: int, workspace_id: int) -> Dict[str, Any]:
     """Move a change to another workspace."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/changes/{change_id}/move_workspace"
@@ -1344,7 +1503,7 @@ async def move_change(change_id: int, workspace_id: int) -> Dict[str, Any]:
                 return {"error": str(e), "raw_response": e.response.text}
 
 #LIST CHANGE FIELDS
-@mcp.tool()
+@allowed_tool()
 async def list_change_fields() -> Dict[str, Any]:
     """List all change fields."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/change_form_fields"
@@ -1362,7 +1521,7 @@ async def list_change_fields() -> Dict[str, Any]:
                 return {"error": str(e), "raw_response": e.response.text}
 
 #GET SERVICE ITEMS
-@mcp.tool()
+@allowed_tool()
 async def list_service_items(page: Optional[int] = 1, per_page: Optional[int] = 30) -> Dict[str, Any]:
     """Get list of service items from Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/service_catalog/items"
@@ -1414,7 +1573,7 @@ async def list_service_items(page: Optional[int] = 1, per_page: Optional[int] = 
     }
        
 #GET REQUESTED ITEMS 
-@mcp.tool()
+@allowed_tool()
 async def get_requested_items(ticket_id: int) -> dict:
     """Fetch requested items for a specific ticket if the ticket is a service request."""
     
@@ -1470,7 +1629,7 @@ async def get_requested_items(ticket_id: int) -> dict:
             return {"success": False, "error": f"An unexpected error occurred: {str(e)}"}
 
 #CREATE SERVICE REQUEST
-@mcp.tool()
+@allowed_tool()
 async def create_service_request(
     display_id: int,
     email: str,
@@ -1512,7 +1671,7 @@ async def create_service_request(
             return {"success": False, "error": str(e)}
 
 #SEND TICKET REPLY
-@mcp.tool()
+@allowed_tool()
 async def send_ticket_reply(
     ticket_id: int,
     body: str,
@@ -1570,7 +1729,7 @@ async def send_ticket_reply(
             return {"success": False, "error": f"An unexpected error occurred: {str(e)}"}
 
 #CREATE A Note
-@mcp.tool()
+@allowed_tool()
 async def create_ticket_note(ticket_id: int,body: str)-> Dict[str, Any]:
     """Create a note for a ticket in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}/notes"
@@ -1585,7 +1744,7 @@ async def create_ticket_note(ticket_id: int,body: str)-> Dict[str, Any]:
  #UPDATE A CONVERSATION
 
 #UPDATE TICKET CONVERSATION
-@mcp.tool()
+@allowed_tool()
 async def update_ticket_conversation(conversation_id: int,body: str)-> Dict[str, Any]:
     """Update a conversation for a ticket in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/conversations/{conversation_id}"
@@ -1602,7 +1761,7 @@ async def update_ticket_conversation(conversation_id: int,body: str)-> Dict[str,
             return f"Cannot update conversation ${response.json()}"
         
 #GET ALL TICKET CONVERSATION
-@mcp.tool()
+@allowed_tool()
 async def list_all_ticket_conversation(ticket_id: int)-> Dict[str, Any]:
     """List all conversation of a ticket in freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}/conversations"
@@ -1617,7 +1776,7 @@ async def list_all_ticket_conversation(ticket_id: int)-> Dict[str, Any]:
             return f"Cannot fetch ticket conversations ${response.json()}"
         
 #GET ALL PRODUCTS
-@mcp.tool()
+@allowed_tool()
 async def get_all_products(page: Optional[int] = 1, per_page: Optional[int] = 30) -> Dict[str, Any]:
     """List all the products from Freshservice."""
     if page < 1:
@@ -1663,7 +1822,7 @@ async def get_all_products(page: Optional[int] = 1, per_page: Optional[int] = 30
             return {"success": False, "error": f"Unexpected error occurred: {str(e)}"}
         
 #GET PRODUCT BY ID
-@mcp.tool()
+@allowed_tool()
 async def get_products_by_id(product_id:int)-> Dict[str, Any]:
     """Get product by product ID in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/products/{product_id}"
@@ -1678,7 +1837,7 @@ async def get_products_by_id(product_id:int)-> Dict[str, Any]:
             return f"Cannot fetch products from the freshservice ${response.json()}"
         
 #CREATE PRODUCT
-@mcp.tool()
+@allowed_tool()
 async def create_product(
     name: str,
     asset_type_id: int,
@@ -1753,7 +1912,7 @@ async def create_product(
             }
 
 #UPDATE PRODUCT 
-@mcp.tool()
+@allowed_tool()
 async def update_product(
     id: int,
     name: str,
@@ -1828,7 +1987,7 @@ async def update_product(
             }
         
 #CREATE REQUESTER
-@mcp.tool()
+@allowed_tool()
 async def create_requester(
     first_name: str,
     last_name: Optional[str] = None,
@@ -1908,7 +2067,7 @@ async def create_requester(
             }
             
 #GET ALL REQUESTER
-@mcp.tool()
+@allowed_tool()
 async def get_all_requesters(page: int = 1, per_page: int = 30) -> Dict[str, Any]:
     """Fetch all requesters from Freshservice."""
     if page < 1:
@@ -1949,7 +2108,7 @@ async def get_all_requesters(page: int = 1, per_page: int = 30) -> Dict[str, Any
             return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
 #GET REQUESTERS BY ID
-@mcp.tool()
+@allowed_tool()
 async def get_requester_id(requester_id:int)-> Dict[str, Any]:
     """Get requester by ID in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/requesters/{requester_id}"
@@ -1964,7 +2123,7 @@ async def get_requester_id(requester_id:int)-> Dict[str, Any]:
             return f"Cannot fetch requester from the freshservice ${response.json()}"
 
 #LIST ALL REQUESTER FIELDS
-@mcp.tool()
+@allowed_tool()
 async def list_all_requester_fields()-> Dict[str, Any]:
     """List all requester fields in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/requester_fields"
@@ -1979,7 +2138,7 @@ async def list_all_requester_fields()-> Dict[str, Any]:
             return f"Cannot fetch requester from the freshservice ${response.json()}"
         
 #UPDATE REQUESTER
-@mcp.tool()
+@allowed_tool()
 async def update_requester(
     requester_id: int,
     first_name: Optional[str] = None,
@@ -2035,7 +2194,7 @@ async def update_requester(
             return {"success": False, "error": response.text, "status_code": response.status_code}   
         
 #FILTER REQUESTERS
-@mcp.tool()
+@allowed_tool()
 async def filter_requesters(query: str,include_agents: bool = False) -> Dict[str, Any]:
     """Filter requesters in Freshservice."""
     encoded_query = urllib.parse.quote(query)
@@ -2057,7 +2216,7 @@ async def filter_requesters(query: str,include_agents: bool = False) -> Dict[str
             }
 
 #CREATE AN AGENT
-@mcp.tool()
+@allowed_tool()
 async def create_agent(
     first_name: str,
     email: str = None,
@@ -2094,7 +2253,7 @@ async def create_agent(
             }
 
 #GET AN AGENT
-@mcp.tool()
+@allowed_tool()
 async def get_agent(agent_id:int)-> Dict[str, Any]:
     """Get agent by id in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/agents/{agent_id}"
@@ -2109,7 +2268,7 @@ async def get_agent(agent_id:int)-> Dict[str, Any]:
             return f"Cannot fetch requester from the freshservice ${response.json()}"
             
 #GET ALL AGENTS
-@mcp.tool()
+@allowed_tool()
 async def get_all_agents(page: int = 1, per_page: int = 30) -> Dict[str, Any]:
     """Fetch agents from Freshservice."""
     if page < 1:
@@ -2159,7 +2318,7 @@ async def get_all_agents(page: int = 1, per_page: int = 30) -> Dict[str, Any]:
             }
             
 #FILTER AGENTS
-@mcp.tool()
+@allowed_tool()
 async def filter_agents(query: str) -> List[Dict[str, Any]]:
     """Filter Freshservice agents based on a query."""
     base_url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/agents"
@@ -2188,7 +2347,7 @@ async def filter_agents(query: str) -> List[Dict[str, Any]]:
     return all_agents
 
 #UPDATE AGENT
-@mcp.tool()
+@allowed_tool()
 async def update_agent(agent_id, occasional=None, email=None, department_ids=None, 
                  can_see_all_tickets_from_associated_departments=None, reporting_manager_id=None, 
                  address=None, time_zone=None, time_format=None, language=None, 
@@ -2224,7 +2383,7 @@ async def update_agent(agent_id, occasional=None, email=None, department_ids=Non
             return f"Cannot fetch agents from the freshservice ${response.json()}"
                       
 #GET AGENT FIELDS
-@mcp.tool()
+@allowed_tool()
 async def get_agent_fields()-> Dict[str, Any]:
     """Get all agent fields in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/agent_fields"
@@ -2239,7 +2398,7 @@ async def get_agent_fields()-> Dict[str, Any]:
             return f"Cannot fetch agents from the freshservice ${response.json()}"
         
 #GET ALL AGENT GROUPS
-@mcp.tool()
+@allowed_tool()
 async def get_all_agent_groups()-> Dict[str, Any]:
     """Get all agent groups in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/groups"
@@ -2254,7 +2413,7 @@ async def get_all_agent_groups()-> Dict[str, Any]:
             return f"Cannot fetch agents from the freshservice ${response.json()}"
         
 #GET AGENT GROUP BY ID
-@mcp.tool()
+@allowed_tool()
 async def getAgentGroupById(group_id:int)-> Dict[str, Any]:
     """Get agent groups by its group id in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/groups/{group_id}"
@@ -2269,7 +2428,7 @@ async def getAgentGroupById(group_id:int)-> Dict[str, Any]:
             return f"Cannot fetch agents from the freshservice ${response.json()}"
         
 #ADD REQUESTER TO GROUP
-@mcp.tool()
+@allowed_tool()
 async def add_requester_to_group(
     group_id: int,
     requester_id: int
@@ -2299,7 +2458,7 @@ async def add_requester_to_group(
             }
         
 #CREATE GROUP
-@mcp.tool()
+@allowed_tool()
 async def create_group(group_data: Dict[str, Any]) -> Dict[str, Any]:
     """Create a group in Freshservice."""
     if "name" not in group_data:
@@ -2328,7 +2487,7 @@ async def create_group(group_data: Dict[str, Any]) -> Dict[str, Any]:
             }
         
 #UPDATE GROUP
-@mcp.tool()
+@allowed_tool()
 async def update_group(group_id: int, group_fields: Dict[str, Any]) -> Dict[str, Any]:
     """Update a group in Freshservice."""
     try:
@@ -2358,7 +2517,7 @@ async def update_group(group_id: int, group_fields: Dict[str, Any]) -> Dict[str,
             }
             
 #GET ALL REQUETER GROUPS 
-@mcp.tool()
+@allowed_tool()
 async def get_all_requester_groups(page: Optional[int] = 1, per_page: Optional[int] = 30) -> Dict[str, Any]:
     """Get all requester groups in Freshservice."""
     if page < 1:
@@ -2403,7 +2562,7 @@ async def get_all_requester_groups(page: Optional[int] = 1, per_page: Optional[i
             return {"error": f"An unexpected error occurred: {str(e)}"}
         
 #GET REQUETER GROUPS BY ID
-@mcp.tool()
+@allowed_tool()
 async def get_requester_groups_by_id(requester_group_id:int)-> Dict[str, Any]:
     """Get requester groups in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/requester_groups/{requester_group_id}"
@@ -2418,7 +2577,7 @@ async def get_requester_groups_by_id(requester_group_id:int)-> Dict[str, Any]:
             return f"Cannot fetch requester group from the freshservice ${response.json()}"
         
 #CREATE REQUESTER GROUP
-@mcp.tool()
+@allowed_tool()
 async def create_requester_group(
     name: str,
     description: Optional[str] = None
@@ -2455,7 +2614,7 @@ async def create_requester_group(
             }
             
 #UPDATE REQUESTER GROUP
-@mcp.tool()
+@allowed_tool()
 async def update_requester_group(id: int,name: Optional[str] = None,description: Optional[str] = None) -> Dict[str, Any]:
     """Update an requester group in Freshservice."""
     group_data = {}
@@ -2489,7 +2648,7 @@ async def update_requester_group(id: int,name: Optional[str] = None,description:
             }
             
 #GET LIST OF REQUESTER GROUP MEMBERS
-@mcp.tool()
+@allowed_tool()
 async def list_requester_group_members(
     group_id: int
 ) -> Dict[str, Any]:
@@ -2523,7 +2682,7 @@ async def list_requester_group_members(
             }
             
 #GET ALL CANNED RESPONSES
-@mcp.tool()
+@allowed_tool()
 async def get_all_canned_response() -> Dict[str, Any]:
     """List all canned response in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/canned_responses"
@@ -2556,7 +2715,7 @@ async def get_all_canned_response() -> Dict[str, Any]:
             }
 
 #GET CANNED RESPONSE BY ID
-@mcp.tool()
+@allowed_tool()
 async def get_canned_response(
     id: int
 ) -> Dict[str, Any]:
@@ -2589,7 +2748,7 @@ async def get_canned_response(
             return {"error": f"Unexpected error: {str(e)}"}
 
 #LIST ALL CANNED RESPONSE FOLDER            
-@mcp.tool()
+@allowed_tool()
 async def list_all_canned_response_folder() -> Dict[str, Any]:
     """List all canned response of a folder in Freshservice."""
     
@@ -2622,7 +2781,7 @@ async def list_all_canned_response_folder() -> Dict[str, Any]:
             }
             
 #LIST CANNED RESPONSE FOLDER
-@mcp.tool()
+@allowed_tool()
 async def list_canned_response_folder(
     id: int
 ) -> Dict[str, Any]:
@@ -2656,7 +2815,7 @@ async def list_canned_response_folder(
             }
             
 #GET ALL WORKSPACES
-@mcp.tool()
+@allowed_tool()
 async def list_all_workspaces() -> Dict[str, Any]:
     """List all workspaces in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/workspaces"
@@ -2688,7 +2847,7 @@ async def list_all_workspaces() -> Dict[str, Any]:
             }
 
 #GET WORKSPACE
-@mcp.tool()
+@allowed_tool()
 async def get_workspace(id: int) -> Dict[str, Any]:
     """Get a workspace by its ID in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/workspaces/{id}"
@@ -2720,7 +2879,7 @@ async def get_workspace(id: int) -> Dict[str, Any]:
             }
             
 #GET ALL SOLUTION CATEGORY
-@mcp.tool()
+@allowed_tool()
 async def get_all_solution_category() -> Dict[str, Any]:
     """Get all solution category in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/solutions/categories"
@@ -2752,7 +2911,7 @@ async def get_all_solution_category() -> Dict[str, Any]:
             }
             
 #GET SOLUTION CATEGORY
-@mcp.tool()
+@allowed_tool()
 async def get_solution_category(id: int) -> Dict[str, Any]:
     """Get solution category by its ID in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/solutions/categories/{id}"
@@ -2784,7 +2943,7 @@ async def get_solution_category(id: int) -> Dict[str, Any]:
             }
             
 #CREATE SOLUTION CATEGORY
-@mcp.tool()
+@allowed_tool()
 async def create_solution_category(
     name: str,
     description: str = None,
@@ -2827,7 +2986,7 @@ async def create_solution_category(
             }
             
 #UPDATE SOLUTION CATEGORY
-@mcp.tool()
+@allowed_tool()
 async def update_solution_category(
     category_id: int,
     name: str,
@@ -2875,7 +3034,7 @@ async def update_solution_category(
             }
 
 #GET LIST OF SOLUTION FOLDER
-@mcp.tool()
+@allowed_tool()
 async def get_list_of_solution_folder(id:int) -> Dict[str, Any]:
     """Get list of solution folder by its ID in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/solutions/folders?category_id={id}"
@@ -2907,7 +3066,7 @@ async def get_list_of_solution_folder(id:int) -> Dict[str, Any]:
             }
             
 #GET SOLUTION FOLDER
-@mcp.tool()
+@allowed_tool()
 async def get_solution_folder(id: int) -> Dict[str, Any]:
     """Get solution folder by its ID in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/solutions/folders/{id}"
@@ -2939,7 +3098,7 @@ async def get_solution_folder(id: int) -> Dict[str, Any]:
             }
             
 #GET LIST OF SOLUTION ARTICLE
-@mcp.tool()
+@allowed_tool()
 async def get_list_of_solution_article(id:int) -> Dict[str, Any]:
     """Get list of solution article in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/solutions/articles?folder_id={id}"
@@ -2971,7 +3130,7 @@ async def get_list_of_solution_article(id:int) -> Dict[str, Any]:
             }
             
 #GET SOLUTION ARTICLE
-@mcp.tool()
+@allowed_tool()
 async def get_solution_article(id:int) -> Dict[str, Any]:
     """Get solution article by id in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/solutions/articles/{id}"
@@ -3002,7 +3161,7 @@ async def get_solution_article(id:int) -> Dict[str, Any]:
             }
 
 #CREATE SOLUTION ARTICLE
-@mcp.tool()
+@allowed_tool()
 async def create_solution_article(
     title: str,
     description: str,
@@ -3054,7 +3213,7 @@ async def create_solution_article(
             }
             
 #UPDATE SOLUTION ARTICLE
-@mcp.tool()  
+@allowed_tool()  
 async def update_solution_article(
     article_id: int,
     title: Optional[str] = None,
@@ -3107,7 +3266,7 @@ async def update_solution_article(
             }
             
 #CREATE SOLUTION FOLDER
-@mcp.tool()
+@allowed_tool()
 async def create_solution_folder(
     name: str,
     category_id: int,
@@ -3157,7 +3316,7 @@ async def create_solution_folder(
             }
 
 #UPDATE SOLUTION FOLDER
-@mcp.tool()
+@allowed_tool()
 async def update_solution_folder(
     id: int,
     name: Optional[str] = None,
@@ -3201,7 +3360,7 @@ async def update_solution_folder(
             }
                     
 #PUBLISH SOLUTION ARTICLE   
-@mcp.tool()
+@allowed_tool()
 async def publish_solution_article(article_id: int) -> Dict[str, Any]:
     """Publish a solution article in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/solutions/articles/{article_id}"

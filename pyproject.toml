@@ -1,7 +1,7 @@
 [project]
-name = "freshservice-mcp"
+name = "freshservice-mcp-managed"
 version = "1.0.0"
-description = "An MCP server for Freshservice"
+description = "A managed fork of freshservice-mcp with controlled tool access via allowlists"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
