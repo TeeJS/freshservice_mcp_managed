@@ -182,6 +182,9 @@ READONLY_TOOLS = {
     "get_ticket_by_id",
     # Ticket Conversations
     "list_all_ticket_conversation",
+    # Ticket Tasks
+    "get_ticket_tasks",
+    "view_ticket_task",
     # Service Catalog
     "list_service_items",
     "get_requested_items",
@@ -1776,6 +1779,46 @@ async def list_all_ticket_conversation(ticket_id: int)-> Dict[str, Any]:
         else:
             return f"Cannot fetch ticket conversations ${response.json()}"
         
+#GET TICKET TASKS
+@allowed_tool()
+async def get_ticket_tasks(ticket_id: int) -> Dict[str, Any]:
+    """Get all tasks associated with a ticket. Returns task details including id, title, description, status, agent_id, group_id, due_date, planned_start_date, planned_end_date, and stack_rank."""
+    url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}/tasks"
+    headers = get_auth_headers()
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            try:
+                return {"error": f"Failed to fetch ticket tasks: {str(e)}", "details": e.response.json()}
+            except Exception:
+                return {"error": f"Failed to fetch ticket tasks: {str(e)}"}
+        except Exception as e:
+            return {"error": f"An unexpected error occurred: {str(e)}"}
+
+#VIEW TICKET TASK
+@allowed_tool()
+async def view_ticket_task(ticket_id: int, task_id: int) -> Dict[str, Any]:
+    """View a specific task on a ticket by task ID."""
+    url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}/tasks/{task_id}"
+    headers = get_auth_headers()
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            try:
+                return {"error": f"Failed to fetch ticket task: {str(e)}", "details": e.response.json()}
+            except Exception:
+                return {"error": f"Failed to fetch ticket task: {str(e)}"}
+        except Exception as e:
+            return {"error": f"An unexpected error occurred: {str(e)}"}
+
 #GET ALL PRODUCTS
 @allowed_tool()
 async def get_all_products(page: Optional[int] = 1, per_page: Optional[int] = 30) -> Dict[str, Any]:
