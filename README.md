@@ -112,6 +112,12 @@ The Freshservice API key's RBAC role is the primary security boundary. Even if a
 |------|-------------|
 | `list_all_ticket_conversation` | List conversations on a ticket |
 
+### Ticket Tasks
+| Tool | Description |
+|------|-------------|
+| `get_ticket_tasks` | List all tasks on a ticket (includes agent_id, group_id, status, due dates, stack rank) |
+| `view_ticket_task` | Get a single ticket task by ID |
+
 ### Service Catalog
 | Tool | Description |
 |------|-------------|
