@@ -1,8 +1,89 @@
 # Freshservice Managed MCP Server
 
-A managed fork of [effytech/freshservice_mcp](https://github.com/effytech/freshservice_mcp) with controlled tool access via allowlists. By default, only read/query tools are exposed. Write tools can be selectively enabled as needed.
+A managed fork of [effytech/freshservice_mcp](https://github.com/effytech/freshservice_mcp) with controlled tool access via allowlists. Designed to run as a standalone Docker container on your network, accessible by any MCP-compatible client.
 
-## How It Works
+By default, only read/query tools are exposed. Write tools can be selectively enabled as needed.
+
+## Quick Start (Docker)
+
+### Pull and run from GitHub Container Registry
+
+```bash
+docker run -d \
+  --name freshservice-mcp \
+  -p 8080:8080 \
+  -e FRESHSERVICE_APIKEY=your_api_key \
+  -e FRESHSERVICE_DOMAIN=yourcompany.freshservice.com \
+  ghcr.io/teejs/freshservice_mcp_managed:latest
+```
+
+The MCP server will be available at `http://<your-host-ip>:8080/mcp`.
+
+### Build from source
+
+```bash
+git clone https://github.com/TeeJS/freshservice_mcp_managed.git
+cd freshservice_mcp_managed
+docker build -t freshservice_mcp_managed .
+docker run -d \
+  --name freshservice-mcp \
+  -p 8080:8080 \
+  -e FRESHSERVICE_APIKEY=your_api_key \
+  -e FRESHSERVICE_DOMAIN=yourcompany.freshservice.com \
+  freshservice_mcp_managed
+```
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `FRESHSERVICE_APIKEY` | Yes | -- | Your Freshservice API key |
+| `FRESHSERVICE_DOMAIN` | Yes | -- | Your Freshservice domain (e.g., `yourcompany.freshservice.com`) |
+| `MCP_PORT` | No | `8080` | Port the MCP server listens on inside the container |
+
+## Connecting MCP Clients
+
+The server uses Streamable HTTP transport. Clients connect to `http://<host-ip>:<port>/mcp`.
+
+### Claude Desktop
+
+Add to your `claude_desktop_config.json`:
+
+```json
+"mcpServers": {
+  "freshservice": {
+    "type": "streamable-http",
+    "url": "http://<your-host-ip>:8080/mcp"
+  }
+}
+```
+
+### Claude Code
+
+```bash
+claude mcp add freshservice --transport streamable-http http://<your-host-ip>:8080/mcp
+```
+
+### NanoClaw
+
+Add to your NanoClaw MCP configuration:
+
+```yaml
+mcp_servers:
+  freshservice:
+    transport: streamable-http
+    url: http://<your-host-ip>:8080/mcp
+```
+
+### UNRAID Setup
+
+1. In the UNRAID Docker UI, add a new container
+2. Set the repository to `ghcr.io/teejs/freshservice_mcp_managed:latest`
+3. Add the environment variables `FRESHSERVICE_APIKEY` and `FRESHSERVICE_DOMAIN`
+4. Map container port `8080` to your desired host port
+5. Start the container
+
+## How the Allowlist Works
 
 This fork uses three sets in `server.py` to control which tools MCP clients can see:
 
@@ -16,7 +97,7 @@ Only tools in `READONLY_TOOLS` or `ALLOWED_WRITE_TOOLS` are registered with the 
 
 1. Move the tool name from `DISABLED_WRITE_TOOLS` to `ALLOWED_WRITE_TOOLS` in `server.py`
 2. Update your Freshservice API key's RBAC role to permit that action
-3. Restart the MCP server
+3. Rebuild the Docker image and restart the container
 
 ## Security Model
 
@@ -155,37 +236,6 @@ When using `filter_tickets`, `filter_changes`, `get_changes`, or `filter_agents`
 - `"approval_status:1 AND status:<6"` -- Approved changes that are not closed
 - `"planned_start_date:>'2025-07-14'"` -- Changes starting after a specific date
 
-## Getting Started
-
-### Prerequisites
-
-- A Freshservice account
-- Freshservice API key (with a custom read-only role recommended)
-- `uvx` installed (`pip install uv` or `brew install uv`)
-
-### Configuration
-
-1. Generate your Freshservice API key from Profile Settings > API Settings
-2. Create a custom role with only read permissions for the modules you need
-3. Add the following to your `claude_desktop_config.json`:
-
-```json
-"mcpServers": {
-  "freshservice-mcp-managed": {
-    "command": "uvx",
-    "args": [
-        "freshservice-mcp-managed"
-    ],
-    "env": {
-      "FRESHSERVICE_APIKEY": "<YOUR_FRESHSERVICE_APIKEY>",
-      "FRESHSERVICE_DOMAIN": "<YOUR_FRESHSERVICE_DOMAIN>"
-    }
-  }
-}
-```
-
-**Important**: Replace `<YOUR_FRESHSERVICE_APIKEY>` with your actual API key and `<YOUR_FRESHSERVICE_DOMAIN>` with your domain (e.g., `yourcompany.freshservice.com`)
-
 ## Example Operations
 
 - "List all open tickets"
@@ -205,13 +255,7 @@ git fetch upstream
 git merge upstream/main
 ```
 
-New tools from upstream will not be exposed until they are added to the appropriate set in `server.py`.
-
-## Testing
-
-```bash
-uvx freshservice-mcp-managed --env FRESHSERVICE_APIKEY=<your_api_key> --env FRESHSERVICE_DOMAIN=<your_domain>
-```
+New tools from upstream will not be exposed until they are added to the appropriate set in `server.py`. After merging, rebuild the Docker image.
 
 ## License
 

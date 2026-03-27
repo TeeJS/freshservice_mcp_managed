@@ -3399,8 +3399,13 @@ def get_auth_headers():
     }
 
 def main():
-    logging.info("Starting Freshservice MCP server")
-    mcp.run(transport='stdio')
+    port = int(os.getenv("MCP_PORT", "8080"))
+    logging.info(f"Starting Freshservice Managed MCP server on port {port}")
+    mcp.run(
+        transport='streamable-http',
+        host='0.0.0.0',
+        port=port,
+    )
 
 if __name__ == "__main__":
     main()
