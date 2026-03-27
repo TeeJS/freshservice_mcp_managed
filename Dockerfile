@@ -24,6 +24,6 @@ RUN pip install --no-cache-dir .
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:${MCP_PORT:-8080}/mcp || exit 1
+    CMD curl -sf -o /dev/null -w '%{http_code}' -H 'Accept: text/event-stream' http://localhost:${MCP_PORT:-8080}/mcp | grep -q '200\|405\|406' || exit 1
 
 ENTRYPOINT ["python", "-m", "freshservice_mcp.server"]
