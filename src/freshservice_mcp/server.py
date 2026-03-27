@@ -20,7 +20,8 @@ logging.basicConfig(level=logging.INFO)
 
 
 # Create MCP INSTANCE
-mcp = FastMCP("freshservice_mcp_managed")
+MCP_PORT = int(os.getenv("MCP_PORT", "8080"))
+mcp = FastMCP("freshservice_mcp_managed", host="0.0.0.0", port=MCP_PORT)
 
 
 # API CREDENTIALS
@@ -3399,13 +3400,8 @@ def get_auth_headers():
     }
 
 def main():
-    port = int(os.getenv("MCP_PORT", "8080"))
-    logging.info(f"Starting Freshservice Managed MCP server on port {port}")
-    mcp.run(
-        transport='streamable-http',
-        host='0.0.0.0',
-        port=port,
-    )
+    logging.info(f"Starting Freshservice Managed MCP server on port {MCP_PORT}")
+    mcp.run(transport='streamable-http')
 
 if __name__ == "__main__":
     main()
