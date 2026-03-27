@@ -75,14 +75,6 @@ mcp_servers:
     url: http://<your-host-ip>:8080/mcp
 ```
 
-### UNRAID Setup
-
-1. In the UNRAID Docker UI, add a new container
-2. Set the repository to `ghcr.io/teejs/freshservice_mcp_managed:latest`
-3. Add the environment variables `FRESHSERVICE_APIKEY` and `FRESHSERVICE_DOMAIN`
-4. Map container port `8080` to your desired host port
-5. Start the container
-
 ## How the Allowlist Works
 
 This fork uses three sets in `server.py` to control which tools MCP clients can see:
