@@ -39,7 +39,7 @@ docker run -d \
 |----------|----------|---------|-------------|
 | `FRESHSERVICE_APIKEY` | Yes | -- | Your Freshservice API key |
 | `FRESHSERVICE_DOMAIN` | Yes | -- | Your Freshservice domain (e.g., `yourcompany.freshservice.com`) |
-| `MCP_PORT` | No | `8080` | Port the MCP server listens on inside the container |
+| `MCP_PORT` | Yes | `8080` | Port the MCP server listens on inside the container |
 
 ## Connecting MCP Clients
 
@@ -64,9 +64,9 @@ Add to your `claude_desktop_config.json`:
 claude mcp add freshservice --transport streamable-http http://<your-host-ip>:8080/mcp
 ```
 
-### NanoClaw
+### NanoClaw/OpenClaw
 
-Add to your NanoClaw MCP configuration:
+Add to your NClaw MCP configuration:
 
 ```yaml
 mcp_servers:
