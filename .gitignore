@@ -175,3 +175,4 @@ cython_debug/
 
 # Backups
 .backups/
+.backup/
