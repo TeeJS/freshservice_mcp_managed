@@ -185,6 +185,29 @@ READONLY_TOOLS = {
     # Ticket Tasks
     "get_ticket_tasks",
     "view_ticket_task",
+    # Requesters
+    "get_all_requesters",
+    "get_requester_id",
+    "list_all_requester_fields",
+    "filter_requesters",
+    # Agents
+    "get_agent",
+    "get_all_agents",
+    "get_agent_fields",
+    "filter_agents",
+    # Agent Groups
+    "get_all_agent_groups",
+    "getAgentGroupById",
+    # Requester Groups
+    "get_all_requester_groups",
+    "get_requester_groups_by_id",
+    "list_requester_group_members",
+    # Workspaces
+    "list_all_workspaces",
+    "get_workspace",
+}
+
+DISABLED_READONLY_TOOLS = {
     # Service Catalog
     "list_service_items",
     "get_requested_items",
@@ -209,23 +232,6 @@ READONLY_TOOLS = {
     # Products
     "get_all_products",
     "get_products_by_id",
-    # Requesters
-    "get_all_requesters",
-    "get_requester_id",
-    "list_all_requester_fields",
-    "filter_requesters",
-    # Agents
-    "get_agent",
-    "get_all_agents",
-    "get_agent_fields",
-    "filter_agents",
-    # Agent Groups
-    "get_all_agent_groups",
-    "getAgentGroupById",
-    # Requester Groups
-    "get_all_requester_groups",
-    "get_requester_groups_by_id",
-    "list_requester_group_members",
     # Canned Responses
     "get_all_canned_response",
     "get_canned_response",
@@ -240,9 +246,6 @@ READONLY_TOOLS = {
     # Solution Articles
     "get_list_of_solution_article",
     "get_solution_article",
-    # Workspaces
-    "list_all_workspaces",
-    "get_workspace",
 }
 
 ALLOWED_WRITE_TOOLS = set()
