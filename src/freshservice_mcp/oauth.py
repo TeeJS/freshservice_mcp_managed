@@ -330,11 +330,25 @@ class AuthMiddleware:
             return
 
         subject = claims.get("sub", "<unknown>")
-        permission = self.rs.evaluate(self.rs.groups_from(claims))
+        groups = self.rs.groups_from(claims)
+        permission = self.rs.evaluate(groups)
+
+        # Group names are logged deliberately. An empty list and a populated one
+        # that simply misses the mapped group are different faults -- a missing
+        # claims policy on the provider versus a missing group on the account --
+        # and they are otherwise indistinguishable from the client side.
+        groups_repr = ",".join(sorted(groups)) if groups else "<none in token>"
 
         if permission == PERM_NONE:
             # The token is valid; re-authenticating changes nothing, so 403.
-            log.warning("AUTHZ_DENIED subject=%s reason=no_mapped_group", subject)
+            log.warning(
+                "AUTHZ_DENIED subject=%s groups=%s reason=no_mapped_group "
+                "expected_read=%s expected_write=%s",
+                subject,
+                groups_repr,
+                ",".join(sorted(self.config.read_groups)) or "<unset>",
+                ",".join(sorted(self.config.write_groups)) or "<unset>",
+            )
             await _send_json(
                 send,
                 403,
@@ -348,7 +362,12 @@ class AuthMiddleware:
 
         # Info, not debug: who was granted what is an audit record, and it is
         # worthless if it only appears once someone thinks to raise the level.
-        log.info("AUTHZ_GRANTED subject=%s permission=%s", subject, permission)
+        log.info(
+            "AUTHZ_GRANTED subject=%s permission=%s groups=%s",
+            subject,
+            permission,
+            groups_repr,
+        )
         scope[SCOPE_KEY] = permission
         await self.app(scope, receive, send)
 

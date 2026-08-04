@@ -172,17 +172,32 @@ until the restart in step 5.
 
 ### Confirming the group reached the token
 
-This is the failure that reads as a bug rather than a config problem: if the
-group is missing from the **access token**, the connector succeeds and shows
-only read tools, or none. After connecting, decode a token and inspect it:
+Do this **after** step 7, once the connector has been used at least once. Read
+the MCP server's own authorization log — it records every decision, so no token
+handling is needed:
 
 ```bash
-python3 -c "import base64,json,sys; p=sys.argv[1].split('.')[1]; print(json.dumps(json.loads(base64.urlsafe_b64decode(p+'='*(-len(p)%4))),indent=2))" "$JWT"
+docker logs freshservice-mcp 2>&1 | grep AUTHZ
 ```
 
-Expect `freshservice-admins` inside a `groups` claim. If `groups` is absent
-entirely, the fault is the `claims_policy` in `configuration.yml`, not this
-file — the two look identical from the client side.
+Read the result off this table:
+
+| Log line | Meaning | Fix |
+|---|---|---|
+| `AUTHZ_GRANTED ... permission=write groups=freshservice-admins` | Correct. Done. | — |
+| `AUTHZ_GRANTED ... permission=read` | Account is in the read group, not the write group | Add `freshservice-admins` in step 4 |
+| `AUTHZ_DENIED ... groups=<none in token>` | Groups never reached the token | `claims_policy` missing or wrong in `configuration.yml` (step 3) |
+| `AUTHZ_DENIED ... groups=joplin-admins,...` | Token carries groups, but not a mapped one | Group missing from the account, or Authelia not restarted after step 4 |
+| `OAUTH_TOKEN_REJECTED error=...` | Token failed validation | Usually an issuer mismatch — compare `MCP_OAUTH_ISSUER` byte-for-byte with the discovery document |
+| nothing at all | The request never reached the server | Reverse proxy or DNS, not auth |
+
+The two `AUTHZ_DENIED` variants are the pair that would otherwise be
+indistinguishable — a missing claims policy on the provider versus a missing
+group on the account. The `groups=` field separates them.
+
+Do **not** try to decode the access token by hand. It is held by the connector,
+and this server deliberately never logs bearer tokens, so there is nowhere to
+obtain one from.
 
 ## 5. Validate, then restart — CONTAINER, then HOST
 
