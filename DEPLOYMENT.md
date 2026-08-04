@@ -27,18 +27,54 @@ fails with "No such container".
 
 ---
 
-## 1. Generate the client secret — CONTAINER
+## 1. Generate the client secret AND the config block — HOST
+
+Run this rather than copying a template with a placeholder in it. It prints the
+secret to save and emits the finished YAML with the digest already substituted,
+so there is nothing to fill in by hand:
 
 ```bash
-docker exec -it Authelia authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72 --random.charset rfc3986
+OUT=$(docker exec Authelia authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72 --random.charset rfc3986); DIGEST=$(printf '%s\n' "$OUT" | grep -o '[$]pbkdf2-sha512[$][^[:space:]]*'); echo "$OUT"; echo; echo "--- paste below into the clients: list ---"; echo; cat <<YAML
+      - client_id: 'freshservice-mcp'
+        client_name: 'Freshservice MCP'
+        client_secret: '$DIGEST'
+        public: false
+        authorization_policy: 'one_factor'
+        require_pkce: true
+        pkce_challenge_method: 'S256'
+        access_token_signed_response_alg: 'RS256'
+        token_endpoint_auth_method: 'client_secret_post'
+        claims_policy: 'freshservice_mcp'
+        audience:
+          - 'https://freshservice-mcp.example.com/mcp'
+        redirect_uris:
+          - 'https://claude.ai/api/mcp/auth_callback'
+          - 'http://localhost/callback'
+          - 'http://127.0.0.1/callback'
+        scopes:
+          - 'openid'
+          - 'profile'
+          - 'email'
+          - 'address'
+          - 'phone'
+          - 'groups'
+          - 'offline_access'
+        grant_types:
+          - 'authorization_code'
+          - 'refresh_token'
+        response_types:
+          - 'code'
+YAML
 ```
 
-This prints two values:
+The command prints two values. **Random Password** is the plaintext — it goes
+into the claude.ai connector and is not recoverable later, so save it.
+**Digest** (`$pbkdf2-sha512$...`) is the hash, already substituted into the YAML
+above.
 
-- **Random Password** — the plaintext secret. This goes into the claude.ai
-  connector. Save it somewhere safe; it is not recoverable from the config.
-- **Digest** (`$pbkdf2-sha512$...`) — the hash. This goes into
-  `configuration.yml`.
+Never paste a literal `'$pbkdf2-sha512$...'` into the config. `validate-config`
+rejects it with `pbkdf2 decode error: provided encoded hash has an invalid
+format`, which reads like a broken command rather than an unfilled field.
 
 **No signing key is needed.** Authelia signs all OIDC tokens with the provider
 keypair already in `identity_providers.oidc.jwks`. That list is per-issuer, not
@@ -214,31 +250,54 @@ Then, on the host:
 docker restart Authelia
 ```
 
-## 6. Run the container — HOST
+## 6. Configure the container
+
+Check what already exists before creating anything:
 
 ```bash
-docker run -d \
-  --name freshservice-mcp \
-  -p 8080:8080 \
-  -e FRESHSERVICE_APIKEY=<key> \
-  -e FRESHSERVICE_DOMAIN=yourcompany.freshservice.com \
-  -e MCP_OAUTH_ENABLED=true \
-  -e MCP_OAUTH_ISSUER=https://auth.example.com \
-  -e MCP_SERVER_URL=https://freshservice-mcp.example.com \
-  -e MCP_READ_GROUPS=freshservice-readers \
-  -e MCP_WRITE_GROUPS=freshservice-admins \
-  ghcr.io/teejs/freshservice_mcp_managed:latest
+docker ps -a --filter name=freshservice --format '{{.Names}} | {{.Status}} | {{.Ports}}'
 ```
 
-Leave `MCP_OAUTH_AUDIENCE` unset until the flow works end to end. Enabling it
+### If the container already exists
+
+On Unraid, do **not** `docker run` — it creates a second container the Docker UI
+shows as an orphan, with no template and no update checks. Hand-editing the
+`my-<name>.xml` template does not change a running container either.
+
+Use **Docker tab → the container → Edit → "Add another Path, Port, Variable,
+Label or Device"**, once per variable:
+
+| Config Type | Name / Key | Value |
+|---|---|---|
+| Variable | `MCP_OAUTH_ENABLED` | `true` |
+| Variable | `MCP_OAUTH_ISSUER` | `https://auth.example.com` |
+| Variable | `MCP_SERVER_URL` | `https://freshservice-mcp.example.com` |
+| Variable | `MCP_WRITE_GROUPS` | `freshservice-admins` |
+| Variable | `MCP_READ_GROUPS` | `freshservice-readers` |
+
+Keep the existing host port — it is already assigned and is usually not the same
+as the container port. Then **Apply**.
+
+### If it does not exist yet
+
+Generate a dockerMan template so it is manageable from the UI, rather than
+running it by hand. See the `unraid-container-template` skill.
+
+### Either way
+
+Leave `MCP_OAUTH_AUDIENCE` unset until the flow works end to end — enabling it
 early turns every failure into an identical, uninformative 401.
 
-Point the reverse proxy for `freshservice-mcp.example.com` at this port, then
-confirm the startup log says `MCP_AUTH_ENABLED` and not `MCP_AUTH_DISABLED`:
+Point the reverse proxy for `freshservice-mcp.example.com` at the host port, then
+confirm the posture:
 
 ```bash
-docker logs freshservice-mcp | head -20
+docker logs <container-name> 2>&1 | head -20
 ```
+
+Expect `MCP_AUTH_ENABLED` with the issuer and resource, plus `MCP_AUTHZ_GROUPS`.
+`REFUSING TO START` means the variables did not take — the server exits rather
+than coming up unauthenticated.
 
 ## 7. claude.ai connector
 
