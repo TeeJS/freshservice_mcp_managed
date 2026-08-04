@@ -1,7 +1,6 @@
 # Deployment — freshservice-mcp behind Authelia
 
-Concrete values for this environment. Naming follows the existing `service-a-mcp`
-and `service-b-mcp` clients.
+Naming follows the existing MCP clients already in the Authelia config.
 
 | Thing | Value |
 |---|---|
@@ -10,43 +9,64 @@ and `service-b-mcp` clients.
 | Issuer | `https://auth.example.com` (bare origin, no trailing slash) |
 | `client_id` | `freshservice-mcp` |
 | `claims_policy` | `freshservice_mcp` |
-| `jwks` `key_id` | `freshservice-mcp` |
 | Write group | `freshservice-admins` |
 | Read group | `freshservice-readers` |
 
+### Where commands run
+
+Every command below is marked. Getting this wrong is the easiest mistake here,
+because the same directory has two different paths:
+
+| | Path to Authelia's config |
+|---|---|
+| **On the Unraid host** (`root@host:~#`) | `/mnt/user/appdata/Authelia/` |
+| **Inside the container** (`docker exec`) | `/config/` |
+
+The container is named **`Authelia`** — capital A. `docker exec -it authelia`
+fails with "No such container".
+
 ---
 
-## 1. Generate the key and secret — inside the Authelia container
-
-These must be generated on the Unraid box. **Do not paste the private key or the
-plaintext secret back into a chat session** — a private key that signs access
-tokens lets anyone mint tokens your resource servers will accept.
+## 1. Generate the client secret — CONTAINER
 
 ```bash
-docker exec -it authelia authelia crypto pair rsa generate --bits 4096 --directory /config/oidc/freshservice-mcp
+docker exec -it Authelia authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72 --random.charset rfc3986
+```
+
+This prints two values:
+
+- **Random Password** — the plaintext secret. This goes into the claude.ai
+  connector. Save it somewhere safe; it is not recoverable from the config.
+- **Digest** (`$pbkdf2-sha512$...`) — the hash. This goes into
+  `configuration.yml`.
+
+**No signing key is needed.** Authelia signs all OIDC tokens with the provider
+keypair already in `identity_providers.oidc.jwks`. That list is per-issuer, not
+per-client — `key_id` is only a label. Do not generate a new keypair and do not
+add a `jwks` entry for this client.
+
+> If you ever do need to generate a keypair, `authelia crypto pair rsa generate
+> --directory <dir>` **does not create the directory**. It fails with
+> `open <dir>/private.pem: no such file or directory`. Create it first.
+
+## 2. Back up the config — HOST
+
+Matching the convention already used in that directory:
+
+```bash
+cp /mnt/user/appdata/Authelia/configuration.yml /mnt/user/appdata/Authelia/configuration.yml.bak-$(date +%Y%m%d-%H%M%S)
 ```
 
 ```bash
-docker exec -it authelia authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72 --random.charset rfc3986
+cp /mnt/user/appdata/Authelia/users_database.yml /mnt/user/appdata/Authelia/users_database.yml.bak-$(date +%Y%m%d-%H%M%S)
 ```
 
-The second command prints a **Random Password** (the plaintext secret — this is
-what goes into the claude.ai connector) and a **Digest** (the `$pbkdf2-sha512$...`
-hash — this is what goes into `configuration.yml`). Write the plaintext to a
-`chmod 600` file rather than leaving it in scrollback.
+## 3. Edit `configuration.yml` — HOST
 
-## 2. Back up the config first
+Full path: `/mnt/user/appdata/Authelia/configuration.yml`
 
-Matching the convention already in use in that directory:
-
-```bash
-cp /config/configuration.yml /config/configuration.yml.bak-$(date +%Y%m%d-%H%M%S)
-```
-
-## 3. `configuration.yml`
-
-Add a claims policy under the existing `claims_policies:` block, alongside
-`service_a_mcp` and `service_b_mcp`:
+Add a claims policy to the existing `claims_policies:` block, alongside the ones
+already there:
 
 ```yaml
       freshservice_mcp:
@@ -54,19 +74,7 @@ Add a claims policy under the existing `claims_policies:` block, alongside
           - 'groups'
 ```
 
-Add the signing key to the existing `jwks:` list:
-
-```yaml
-      - key_id: 'freshservice-mcp'
-        algorithm: 'RS256'
-        use: 'sig'
-        key: |
-          -----BEGIN PRIVATE KEY-----
-          <contents of /config/oidc/freshservice-mcp/private.pem>
-          -----END PRIVATE KEY-----
-```
-
-Add the client to the existing `clients:` list:
+Add a client to the existing `clients:` list:
 
 ```yaml
       - client_id: 'freshservice-mcp'
@@ -100,11 +108,11 @@ Add the client to the existing `clients:` list:
           - 'code'
 ```
 
-Why each of the non-obvious ones:
+Why the non-obvious ones:
 
 - `access_token_signed_response_alg: 'RS256'` — Authelia issues **opaque** access
   tokens by default, which cannot be validated statelessly at all.
-- `claims_policy` — without it `groups` goes to `/userinfo` and not into the
+- `claims_policy` — without it `groups` goes to `/userinfo` and never into the
   access token, so the server connects but shows only read tools.
 - `token_endpoint_auth_method: 'client_secret_post'` — Claude uses POST body
   credentials. With `client_secret_basic` the login succeeds and the token
@@ -112,37 +120,39 @@ Why each of the non-obvious ones:
 - `audience` must whitelist the exact resource string, `/mcp` included, or
   Authelia refuses with `Requested audience ... has not been whitelisted`.
 - The full seven-scope list — Claude requests every scope the AS advertises when
-  not told otherwise, and Authelia rejects rather than ignores one the client may
-  not request.
+  not told otherwise, and Authelia rejects rather than ignores one the client is
+  not permitted to request.
 - The two loopback redirect URIs are only needed for Claude Code. Drop them if
   you will only ever connect from claude.ai.
 
-## 4. `users_database.yml`
+## 4. Edit `users_database.yml` — HOST
 
-Add both groups to `youruser`. Without the group the server connects and shows
-nothing, which reads as a bug:
+Full path: `/mnt/user/appdata/Authelia/users_database.yml`
 
-```yaml
-    groups:
-      - 'service-a-admins'
-      - 'service-b-admins'
-      - 'freshservice-admins'
-```
+Add `freshservice-admins` to your account's `groups:` list. Without it the
+server connects and shows nothing, which reads as a bug rather than a policy
+decision.
 
-Authelia does **not** watch this file by default (`authentication_backend.file.watch`
-is `false`), so a group added without a restart has no effect.
+Authelia does **not** watch this file by default
+(`authentication_backend.file.watch` is `false`), so a group added without a
+restart has no effect.
 
-## 5. Validate before restarting
+## 5. Validate, then restart — CONTAINER, then HOST
 
-A bad config takes down SSO for everything behind Authelia, not just this server.
+A bad config takes down SSO for everything behind Authelia, not just this
+server. Validate before restarting, not after.
 
 ```bash
-docker exec -it authelia authelia validate-config --config /config/configuration.yml
+docker exec -it Authelia authelia validate-config --config /config/configuration.yml
 ```
 
-Then restart Authelia.
+Then, on the host:
 
-## 6. Run the container
+```bash
+docker restart Authelia
+```
+
+## 6. Run the container — HOST
 
 ```bash
 docker run -d \
@@ -161,26 +171,33 @@ docker run -d \
 Leave `MCP_OAUTH_AUDIENCE` unset until the flow works end to end. Enabling it
 early turns every failure into an identical, uninformative 401.
 
-Point the reverse proxy for `freshservice-mcp.example.com` at this port.
-Confirm the startup log says `MCP_AUTH_ENABLED` and not `MCP_AUTH_DISABLED`.
+Point the reverse proxy for `freshservice-mcp.example.com` at this port, then
+confirm the startup log says `MCP_AUTH_ENABLED` and not `MCP_AUTH_DISABLED`:
+
+```bash
+docker logs freshservice-mcp | head -20
+```
 
 ## 7. claude.ai connector
 
 Add a **custom connector** at `https://freshservice-mcp.example.com/mcp`,
 filling in Client ID `freshservice-mcp` and the plaintext secret from step 1.
 
-Your Authelia has **no `registration_endpoint`**, so Dynamic Client Registration
-is unavailable and those fields — labelled optional in the UI — are mandatory.
-Leaving them blank produces "Automatic client registration isn't supported."
+If your Authelia advertises no `registration_endpoint`, Dynamic Client
+Registration is unavailable and those fields — labelled optional in the UI — are
+mandatory. Leaving them blank produces "Automatic client registration isn't
+supported."
 
-## 8. Verify, from outside the network
+## 8. Verify from outside the network
+
+Testing from the LAN proves nothing about what the internet can reach.
 
 ```bash
 curl -s https://freshservice-mcp.example.com/healthz
 ```
 
 Expect the app's own JSON, not HTML. HTML means the hostname is not routed to
-the container regardless of the status code.
+the container, regardless of the status code.
 
 ```bash
 curl -s -D - -o /dev/null -X POST https://freshservice-mcp.example.com/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
@@ -190,10 +207,14 @@ Expect `401` and **no** `mcp-session-id` header.
 
 If the connector fails, the client-side message is always the same opaque
 "Authorization with the MCP server failed" and never names the cause. Authelia's
-log does. Read it first.
+log does — read it first:
 
-To check the client credentials without an interactive login, send a deliberately
-invalid code:
+```bash
+docker logs Authelia --tail 50
+```
+
+To check the client credentials without an interactive login, send a
+deliberately invalid authorization code:
 
 ```bash
 curl -s -d "client_id=freshservice-mcp&client_secret=<plaintext>&grant_type=authorization_code&code=bad&redirect_uri=https://claude.ai/api/mcp/auth_callback" https://auth.example.com/api/oidc/token
