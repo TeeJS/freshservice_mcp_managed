@@ -6,6 +6,11 @@ By default, only read/query tools are exposed. Write tools can be selectively en
 
 ## Quick Start (Docker)
 
+> **The HTTP transport requires OAuth.** The server refuses to start without
+> either a valid OAuth configuration or an explicit `MCP_ALLOW_INSECURE=true`
+> opt-out. Exposing an MCP endpoint means exposing the Freshservice tenant to
+> anyone who can reach the port — see [Security Model](#security-model).
+
 ### Pull and run from GitHub Container Registry
 
 ```bash
@@ -14,10 +19,16 @@ docker run -d \
   -p 8080:8080 \
   -e FRESHSERVICE_APIKEY=your_api_key \
   -e FRESHSERVICE_DOMAIN=yourcompany.freshservice.com \
+  -e MCP_OAUTH_ENABLED=true \
+  -e MCP_OAUTH_ISSUER=https://auth.example.com \
+  -e MCP_SERVER_URL=https://freshservice-mcp.example.com \
+  -e MCP_READ_GROUPS=freshservice-readers \
+  -e MCP_WRITE_GROUPS=freshservice-admins \
   ghcr.io/teejs/freshservice_mcp_managed:latest
 ```
 
-The MCP server will be available at `http://<your-host-ip>:8080/mcp`.
+The MCP endpoint is `${MCP_SERVER_URL}/mcp`. Health is `/healthz`, which stays
+unauthenticated so container healthchecks keep working.
 
 ### Build from source
 
@@ -39,30 +50,89 @@ docker run -d \
 |----------|----------|---------|-------------|
 | `FRESHSERVICE_APIKEY` | Yes | -- | Your Freshservice API key |
 | `FRESHSERVICE_DOMAIN` | Yes | -- | Your Freshservice domain (e.g., `yourcompany.freshservice.com`) |
-| `MCP_PORT` | Yes | `8080` | Port the MCP server listens on inside the container |
+| `MCP_PORT` | No | `8080` | Port the MCP server listens on inside the container |
+| `MCP_PATH` | No | `/mcp` | Path the MCP endpoint is served on |
+
+#### Authentication
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `MCP_OAUTH_ENABLED` | Yes\* | `false` | Turns on the OAuth 2.1 resource server |
+| `MCP_OAUTH_ISSUER` | If enabled | -- | Issuer URL, **byte-for-byte** as the provider reports it in its discovery document |
+| `MCP_SERVER_URL` | If enabled | -- | Public base URL, no path. `MCP_SERVER_URL` + `MCP_PATH` is the `resource` value and must equal the connector URL exactly |
+| `MCP_OAUTH_AUDIENCE` | No | empty | Empty skips audience validation. Enable **last** — an `aud` mismatch looks identical to every other 401 |
+| `MCP_ALLOW_INSECURE` | No | `false` | Explicit opt-out that permits running with no authentication |
+
+\* Either `MCP_OAUTH_ENABLED=true` or `MCP_ALLOW_INSECURE=true` must be set, or
+the server exits at startup rather than silently coming up open.
+
+#### Authorization
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `MCP_READ_GROUPS` | No | empty | Comma-separated groups granted the read tools |
+| `MCP_WRITE_GROUPS` | No | empty | Comma-separated groups granted every registered tool |
+| `MCP_OAUTH_GROUPS_CLAIM` | No | `groups` | Token claim holding group membership |
+
+With **neither** list set there is no group policy and any authenticated caller
+reaches every registered tool — the server logs a warning saying so at startup.
+Once **either** is set, a valid token whose user matches no group gets `403`.
+
+Values are whitespace-trimmed at load, because these get pasted by hand into
+container UIs and an invisible tab on the issuer produces an unusable discovery
+URL with an error pointing nowhere near the real mistake.
 
 ## Connecting MCP Clients
 
-The server uses Streamable HTTP transport. Clients connect to `http://<host-ip>:<port>/mcp`.
+The server uses Streamable HTTP transport over HTTPS at `${MCP_SERVER_URL}/mcp`.
 
-### Claude Desktop
+### claude.ai / Cowork (custom connector)
 
-Add to your `claude_desktop_config.json`:
+Add a **custom connector** pointing at `https://freshservice-mcp.example.com/mcp`.
 
-```json
-"mcpServers": {
-  "freshservice": {
-    "type": "streamable-http",
-    "url": "http://<your-host-ip>:8080/mcp"
-  }
-}
+If your identity provider does not advertise a `registration_endpoint`, Dynamic
+Client Registration is unavailable and you must fill in the **Client ID and
+Client Secret** fields. The claude.ai UI labels them optional; they are
+mandatory in that case, and leaving them blank produces "Automatic client
+registration isn't supported."
+
+Register this callback URL on the OAuth client:
+
 ```
+https://claude.ai/api/mcp/auth_callback
+```
+
+Never put a token in the connector URL. The MCP authorization spec prohibits
+access tokens in the query string, and URLs leak through logs and history.
 
 ### Claude Code
 
 ```bash
-claude mcp add freshservice --transport streamable-http http://<your-host-ip>:8080/mcp
+claude mcp add freshservice --transport http https://freshservice-mcp.example.com/mcp
 ```
+
+Claude Code uses a loopback redirect on an ephemeral port, so the OAuth client
+must also accept `http://localhost/callback` and `http://127.0.0.1/callback`
+with the port ignored.
+
+### Verifying the deployment
+
+Run this from **outside** your network. A reverse proxy with no matching host
+returns `200` and a default landing page, so read the body, not just the status.
+
+```bash
+curl -s https://freshservice-mcp.example.com/healthz
+```
+
+Then confirm an anonymous caller is refused — this is the check that catches the
+failure everything else misses:
+
+```bash
+curl -s -D - -o /dev/null -X POST https://freshservice-mcp.example.com/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+```
+
+Expect `401` and **no** `mcp-session-id` header. A session id and a tool list
+mean the server is open.
 
 ### NanoClaw/OpenClaw
 
@@ -93,9 +163,50 @@ Only tools in `READONLY_TOOLS` or `ALLOWED_WRITE_TOOLS` are registered with the 
 
 ## Security Model
 
-The Freshservice API key's RBAC role is the primary security boundary. Even if a tool is exposed via the MCP, Freshservice will reject any action the API key doesn't have permission for. The allowlist is defense-in-depth -- it prevents the AI from even attempting operations you haven't approved.
+Four layers, outermost first.
 
-**Recommended**: Create a custom Freshservice role with only the permissions you need. See [Freshservice RBAC documentation](https://support.freshservice.com/en/support/solutions/articles/50000003741-agent-roles-in-freshservice).
+**1. Authentication (OAuth 2.1 resource server).** The `/mcp` endpoint requires a
+valid JWT bearer token issued by your identity provider. An unauthenticated
+request gets `401` with a `WWW-Authenticate: Bearer resource_metadata="..."`
+header pointing at the discovery document, which is how an MCP client discovers
+where to authenticate. `/healthz` and the two `.well-known` documents stay
+outside the gate — gating discovery makes the flow undiscoverable and gating
+health breaks the container healthcheck.
+
+**2. Authorization (group-based tool gating).** A valid token proves who the
+caller is, not what they may do. Group membership from the token maps onto a
+read/write split enforced at **both** `tools/list` and `tools/call`. Filtering
+the list alone is not a control, because a client can invoke a tool that was
+never listed. A valid token with no mapped group gets `403`, not `401` —
+re-authenticating would change nothing.
+
+**3. The build-time allowlist.** Only tools in `READONLY_TOOLS` or
+`ALLOWED_WRITE_TOOLS` are registered with the MCP server at all. This is an
+allowlist rather than a denylist so that adding a tool and forgetting to
+classify it fails closed.
+
+**4. The Freshservice API key's RBAC role.** The last boundary: Freshservice
+rejects any action the key lacks permission for, whatever the MCP server allows.
+Create a custom role with only the permissions you need — see the
+[Freshservice RBAC documentation](https://support.freshservice.com/en/support/solutions/articles/50000003741-agent-roles-in-freshservice).
+
+### What the read tools actually expose
+
+Worth being concrete, because "read-only" reads as harmless and is not. A caller
+with read access can retrieve every ticket and full conversation thread (ticket
+bodies routinely carry credentials and PII), the complete staff directory with
+names, emails and phone numbers, and the full agent/requester group structure.
+Treat read access as access to the ticket system, because that is what it is.
+
+### Turning auth on breaks existing clients
+
+The gate is on the process, not on one hostname. Every client still pointed at a
+plain LAN URL starts getting `401`. That is correct behaviour and it still reads
+as "the change broke it."
+
+Claude Code is a native client using an RFC 8252 loopback redirect, so it
+additionally needs `http://localhost/callback` and `http://127.0.0.1/callback`
+registered on the OAuth client before it can authenticate at all.
 
 ## Available Tools (Read-Only)
 

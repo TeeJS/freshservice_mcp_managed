@@ -7,8 +7,16 @@ requires-python = ">=3.13"
 dependencies = [
     "build>=1.2.2.post1",
     "httpx==0.28.1",
-    "mcp[cli]>=1.3.0",
+    # Upper bound is load-bearing: mcp 2.0 removed mcp.server.fastmcp, so an
+    # unpinned dependency resolves to a version this server cannot import.
+    "mcp[cli]>=1.28.1,<2",
     "pydantic>=2.10.6",
+    # Declared explicitly rather than relied on transitively via mcp[cli].
+    "python-dotenv>=1.0.0",
+    "uvicorn>=0.30.0",
+    # OAuth 2.1 resource server: JWT access-token validation against the
+    # provider's JWKS. The crypto extra supplies RS256 support.
+    "pyjwt[crypto]>=2.9.0",
 ]
 
 [[project.authors]]

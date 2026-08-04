@@ -23,7 +23,9 @@ RUN pip install --no-cache-dir .
 
 EXPOSE 8080
 
+# /healthz is deliberately outside the auth gate. The previous check hit /mcp,
+# which returns 401 once OAuth is enabled and would mark the container unhealthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf -o /dev/null -w '%{http_code}' -H 'Accept: text/event-stream' http://localhost:${MCP_PORT:-8080}/mcp | grep -q '200\|405\|406' || exit 1
+    CMD curl -sf http://localhost:${MCP_PORT:-8080}/healthz || exit 1
 
 ENTRYPOINT ["python", "-m", "freshservice_mcp.server"]

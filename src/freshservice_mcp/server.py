@@ -6,9 +6,13 @@ import base64
 import json
 import urllib.parse
 from typing import Optional, Dict, Union, Any, List
-from mcp.server.fastmcp import FastMCP 
+import uvicorn
+from mcp import types
+from mcp.server.fastmcp import FastMCP
 from enum import IntEnum, Enum
-from pydantic import BaseModel, Field 
+from pydantic import BaseModel, Field
+
+from . import oauth
 
 
 from dotenv import load_dotenv 
@@ -3445,9 +3449,162 @@ def get_auth_headers():
         "Content-Type": "application/json"
     }
 
+# === AUTHORIZATION: READ/WRITE TOOL GATING ===
+# Authentication proves who the caller is; it does not say what they may do.
+# Without this second step every authenticated user reaches every registered
+# tool. The split is defined as an ALLOWLIST of read tools so that adding a tool
+# and forgetting to classify it fails closed.
+
+READ_TOOLS = frozenset(READONLY_TOOLS)
+
+
+def permission_for_request() -> str:
+    """Read the permission the ASGI middleware stashed on the HTTP request.
+
+    Falls back to "write" when there is no HTTP request at all (stdio) or when
+    no policy was applied. Group policy narrows access; it never widens it, and
+    the server-level allowlists still apply on top of whatever this returns.
+    """
+    try:
+        request = mcp._mcp_server.request_context.request
+    except LookupError:
+        return oauth.PERM_WRITE
+    if request is None:
+        return oauth.PERM_WRITE
+    return request.scope.get(oauth.SCOPE_KEY, oauth.PERM_WRITE)
+
+
+def _install_tool_gating() -> None:
+    """Wrap the handlers FastMCP already installed.
+
+    Re-registering with @server.list_tools() would mean reimplementing FastMCP's
+    tool dispatch and schema handling, so wrap the existing entries instead.
+    Both tools/list and tools/call are gated: filtering the list alone is not a
+    control, because a client can invoke a tool that was never listed.
+    """
+    srv = mcp._mcp_server
+    original_list = srv.request_handlers[types.ListToolsRequest]
+    original_call = srv.request_handlers[types.CallToolRequest]
+
+    async def gated_list(req):
+        result = await original_list(req)
+        if permission_for_request() != oauth.PERM_READ:
+            return result
+        result.root.tools = [
+            tool for tool in result.root.tools if tool.name in READ_TOOLS
+        ]
+        return result
+
+    async def gated_call(req):
+        name = req.params.name
+        if permission_for_request() == oauth.PERM_READ and name not in READ_TOOLS:
+            logging.warning("AUTHZ_TOOL_DENIED tool=%s permission=read", name)
+            return types.ServerResult(
+                types.CallToolResult(
+                    content=[
+                        types.TextContent(
+                            type="text",
+                            text=f"forbidden: {name} requires write access",
+                        )
+                    ],
+                    isError=True,
+                )
+            )
+        return await original_call(req)
+
+    srv.request_handlers[types.ListToolsRequest] = gated_list
+    srv.request_handlers[types.CallToolRequest] = gated_call
+
+
+def _log_startup_posture(config: "oauth.OAuthConfig") -> None:
+    """State the security posture at startup.
+
+    An operator who updates the image but forgets the environment variables gets
+    a server running new code with auth still off. This is the one line that
+    says so.
+    """
+    if config.enabled:
+        logging.info(
+            "MCP_AUTH_ENABLED issuer=%s resource=%s audience=%s",
+            config.issuer,
+            config.resource,
+            config.audience or "<not validated>",
+        )
+        if config.has_group_policy:
+            logging.info(
+                "MCP_AUTHZ_GROUPS read=%s write=%s claim=%s",
+                sorted(config.read_groups) or "<none>",
+                sorted(config.write_groups) or "<none>",
+                config.groups_claim,
+            )
+        else:
+            logging.warning(
+                "MCP_AUTHZ_NO_GROUP_POLICY - every authenticated caller gets full "
+                "access to all %d registered tools. Set MCP_READ_GROUPS / "
+                "MCP_WRITE_GROUPS to restrict.",
+                len(_ACTIVE_TOOLS),
+            )
+    else:
+        logging.warning(
+            "MCP_AUTH_DISABLED - %d tools are reachable by ANY caller who can "
+            "connect, with no authentication. This exposes the Freshservice "
+            "tenant to anyone who can reach this port.",
+            len(_ACTIVE_TOOLS),
+        )
+
+
 def main():
-    logging.info(f"Starting Freshservice Managed MCP server on port {MCP_PORT}")
-    mcp.run(transport='streamable-http')
+    """Run the MCP server over streamable HTTP as an OAuth protected resource."""
+    config = oauth.OAuthConfig.from_env()
+
+    problems = config.validate()
+    if problems:
+        for problem in problems:
+            logging.error("CONFIG_ERROR %s", problem)
+        raise SystemExit(1)
+
+    # OAuth is mandatory for the network transport. Running it open requires an
+    # explicit, deliberate opt-out rather than being what happens by default
+    # when configuration is missing.
+    if not config.enabled and not config.allow_insecure:
+        logging.error(
+            "REFUSING TO START: the HTTP transport exposes %d tools with no "
+            "authentication. Set MCP_OAUTH_ENABLED=true and supply "
+            "MCP_OAUTH_ISSUER and MCP_SERVER_URL, or set MCP_ALLOW_INSECURE=true "
+            "to knowingly run this open.",
+            len(_ACTIVE_TOOLS),
+        )
+        raise SystemExit(1)
+
+    _install_tool_gating()
+    _log_startup_posture(config)
+
+    resource_server = oauth.ResourceServer(config)
+    app = mcp.streamable_http_app()
+
+    # Health and discovery are inserted ahead of the MCP mount and are not
+    # gated, so the container healthcheck keeps working once auth is on and the
+    # authorization flow stays discoverable.
+    for route in reversed(oauth.discovery_routes(config, lambda: len(_ACTIVE_TOOLS))):
+        app.router.routes.insert(0, route)
+
+    if config.enabled:
+        app.add_middleware(oauth.AuthMiddleware, resource_server=resource_server)
+
+    logging.info(
+        "Starting Freshservice Managed MCP server on port %s path %s",
+        MCP_PORT,
+        config.mcp_path,
+    )
+    uvicorn.run(app, host="0.0.0.0", port=MCP_PORT, log_level="info")
+
+
+def main_stdio():
+    """Run over stdio for local use. No network exposure, so no gate."""
+    _install_tool_gating()
+    logging.info("Starting Freshservice Managed MCP server on stdio")
+    mcp.run(transport="stdio")
+
 
 if __name__ == "__main__":
     main()
