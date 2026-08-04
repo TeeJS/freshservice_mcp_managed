@@ -129,13 +129,60 @@ Why the non-obvious ones:
 
 Full path: `/mnt/user/appdata/Authelia/users_database.yml`
 
-Add `freshservice-admins` to your account's `groups:` list. Without it the
-server connects and shows nothing, which reads as a bug rather than a policy
-decision.
+Add one line to your account's existing `groups:` list:
+
+```yaml
+      - 'freshservice-admins'
+```
+
+The result, with the surrounding structure for alignment. `users:` sits at
+column 0, the username is indented 2, `groups:` is indented 4, and each group
+item is indented 6:
+
+```yaml
+users:
+  youruser:
+    disabled: false
+    displayname: '...'          # leave every existing line untouched
+    password: '...'             # do not touch
+    email: '...'
+    groups:
+      - 'existing-group-a'
+      - 'existing-group-b'
+      - 'freshservice-admins'   # <-- the only new line
+```
+
+Details that bite:
+
+- **Six spaces of indentation**, matching the list items above. YAML is
+  whitespace-sensitive and a misaligned item is the most common way this file
+  breaks. Spaces only — a tab fails outright.
+- **Match the surrounding quote style.**
+- **Do not also add `freshservice-readers` to the same account.** Write access
+  includes everything read access grants and the server checks the write group
+  first, so listing both changes nothing. The read group matters only for a
+  second account that should be limited to the read tools.
+- **`MCP_READ_GROUPS` naming a group nobody is in is not an error.** It just
+  means no one currently holds read-only access. The group does not need to
+  exist anywhere for the server to start or work.
 
 Authelia does **not** watch this file by default
-(`authentication_backend.file.watch` is `false`), so a group added without a
-restart has no effect.
+(`authentication_backend.file.watch` is `false`), so the change has no effect
+until the restart in step 5.
+
+### Confirming the group reached the token
+
+This is the failure that reads as a bug rather than a config problem: if the
+group is missing from the **access token**, the connector succeeds and shows
+only read tools, or none. After connecting, decode a token and inspect it:
+
+```bash
+python3 -c "import base64,json,sys; p=sys.argv[1].split('.')[1]; print(json.dumps(json.loads(base64.urlsafe_b64decode(p+'='*(-len(p)%4))),indent=2))" "$JWT"
+```
+
+Expect `freshservice-admins` inside a `groups` claim. If `groups` is absent
+entirely, the fault is the `claims_policy` in `configuration.yml`, not this
+file — the two look identical from the client side.
 
 ## 5. Validate, then restart — CONTAINER, then HOST
 
