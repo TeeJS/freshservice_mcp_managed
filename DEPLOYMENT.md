@@ -288,8 +288,9 @@ running it by hand. See the `unraid-container-template` skill.
 Leave `MCP_OAUTH_AUDIENCE` unset until the flow works end to end — enabling it
 early turns every failure into an identical, uninformative 401.
 
-Point the reverse proxy for `freshservice-mcp.example.com` at the host port, then
-confirm the posture:
+The reverse proxy entry for this hostname is already in place — anything
+reaching this stage of the guide was deployed behind it before setup began.
+Confirm the posture:
 
 ```bash
 docker logs <container-name> 2>&1 | head -20
