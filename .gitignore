@@ -176,3 +176,6 @@ cython_debug/
 # Backups
 .backups/
 .backup/
+
+# Local deployment notes with real hostnames — never commit (public repo)
+DEPLOYMENT.local.md
