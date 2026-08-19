@@ -1787,7 +1787,7 @@ async def list_all_ticket_conversation(ticket_id: int)-> Dict[str, Any]:
         if status_code == 200:
             return response.json()
         else:
-            return f"Cannot fetch ticket conversations ${response.json()}"
+            return {"error": "Cannot fetch ticket conversations", "details": response.json()}
         
 #GET TICKET TASKS
 @allowed_tool()
@@ -2174,7 +2174,7 @@ async def get_requester_id(requester_id:int)-> Dict[str, Any]:
         if status_code == 200:
             return response.json()
         else:
-            return f"Cannot fetch requester from the freshservice ${response.json()}"
+            return {"error": "Cannot fetch requester from the freshservice", "details": response.json()}
 
 #LIST ALL REQUESTER FIELDS
 @allowed_tool()
@@ -2189,7 +2189,7 @@ async def list_all_requester_fields()-> Dict[str, Any]:
         if status_code == 200:
             return response.json()
         else:
-            return f"Cannot fetch requester from the freshservice ${response.json()}"
+            return {"error": "Cannot fetch requester from the freshservice", "details": response.json()}
         
 #UPDATE REQUESTER
 @allowed_tool()
@@ -2319,7 +2319,7 @@ async def get_agent(agent_id:int)-> Dict[str, Any]:
         if status_code == 200:
             return response.json()
         else:
-            return f"Cannot fetch requester from the freshservice ${response.json()}"
+            return {"error": "Cannot fetch requester from the freshservice", "details": response.json()}
             
 #GET ALL AGENTS
 @allowed_tool()
@@ -2449,7 +2449,7 @@ async def get_agent_fields()-> Dict[str, Any]:
         if status_code == 200:
             return response.json()
         else:
-            return f"Cannot fetch agents from the freshservice ${response.json()}"
+            return {"error": "Cannot fetch agents from the freshservice", "details": response.json()}
         
 #GET ALL AGENT GROUPS
 @allowed_tool()
@@ -2464,7 +2464,7 @@ async def get_all_agent_groups()-> Dict[str, Any]:
         if status_code == 200:
             return response.json()
         else:
-            return f"Cannot fetch agents from the freshservice ${response.json()}"
+            return {"error": "Cannot fetch agents from the freshservice", "details": response.json()}
         
 #GET AGENT GROUP BY ID
 @allowed_tool()
@@ -2479,7 +2479,7 @@ async def getAgentGroupById(group_id:int)-> Dict[str, Any]:
         if status_code == 200:
             return response.json()
         else:
-            return f"Cannot fetch agents from the freshservice ${response.json()}"
+            return {"error": "Cannot fetch agents from the freshservice", "details": response.json()}
         
 #ADD REQUESTER TO GROUP
 @allowed_tool()
@@ -2628,7 +2628,7 @@ async def get_requester_groups_by_id(requester_group_id:int)-> Dict[str, Any]:
         if status_code == 200:
             return response.json()
         else:
-            return f"Cannot fetch requester group from the freshservice ${response.json()}"
+            return {"error": "Cannot fetch requester group from the freshservice", "details": response.json()}
         
 #CREATE REQUESTER GROUP
 @allowed_tool()
