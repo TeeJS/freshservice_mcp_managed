@@ -325,11 +325,14 @@ DISABLED_WRITE_TOOLS = {
 _ACTIVE_TOOLS = READONLY_TOOLS | ALLOWED_WRITE_TOOLS
 
 
-def allowed_tool():
-    """Register a tool only if it's in READONLY_TOOLS or ALLOWED_WRITE_TOOLS."""
+def allowed_tool(**tool_kwargs):
+    """Register a tool only if it's in READONLY_TOOLS or ALLOWED_WRITE_TOOLS.
+
+    Any keyword args are forwarded to mcp.tool() (e.g. structured_output=False).
+    """
     def decorator(func):
         if func.__name__ in _ACTIVE_TOOLS:
-            return mcp.tool()(func)
+            return mcp.tool(**tool_kwargs)(func)
         return func
     return decorator
 
@@ -557,8 +560,8 @@ async def delete_ticket(ticket_id: int) -> str:
             except ValueError:
                 return "Error: Unexpected response format"
     
-#GET TICKET BY ID  
-@allowed_tool()
+#GET TICKET BY ID
+@allowed_tool(structured_output=False)
 async def get_ticket_by_id(ticket_id:int) -> Dict[str, Any]:
     """Get a ticket in Freshservice."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}"
