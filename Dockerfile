@@ -21,6 +21,10 @@ COPY src ./src
 # Install project and dependencies
 RUN pip install --no-cache-dir .
 
+# Drop root: run the server as an unprivileged user
+RUN useradd --create-home --uid 10001 appuser
+USER appuser
+
 EXPOSE 8080
 
 # /healthz is deliberately outside the auth gate. The previous check hit /mcp,

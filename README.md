@@ -60,7 +60,7 @@ docker run -d \
 | `MCP_OAUTH_ENABLED` | Yes\* | `false` | Turns on the OAuth 2.1 resource server |
 | `MCP_OAUTH_ISSUER` | If enabled | -- | Issuer URL, **byte-for-byte** as the provider reports it in its discovery document |
 | `MCP_SERVER_URL` | If enabled | -- | Public base URL, no path. `MCP_SERVER_URL` + `MCP_PATH` is the `resource` value and must equal the connector URL exactly |
-| `MCP_OAUTH_AUDIENCE` | No | empty | Empty skips audience validation. Enable **last** — an `aud` mismatch looks identical to every other 401 |
+| `MCP_OAUTH_AUDIENCE` | Recommended | empty | The token's expected `aud`. **Empty skips audience validation** — any valid token the issuer minted for *another* client/resource is then accepted, so set this whenever the issuer serves more than this one resource. Enable **last**: an `aud` mismatch looks identical to every other 401 |
 | `MCP_ALLOW_INSECURE` | No | `false` | Explicit opt-out that permits running with no authentication |
 
 \* Either `MCP_OAUTH_ENABLED=true` or `MCP_ALLOW_INSECURE=true` must be set, or
