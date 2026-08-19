@@ -176,6 +176,9 @@ cython_debug/
 # Backups
 .backups/
 .backup/
+# Timestamped backups (e.g. README.md.bak_20260327_062953)
+*.bak
+*.bak_*
 
 # Local deployment notes with real hostnames — never commit (public repo)
 DEPLOYMENT.local.md
