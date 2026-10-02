@@ -1,6 +1,6 @@
 # PROJECT CHARTER — Per-user Freshservice keys in Open WebUI
 
-**Status:** REVISION 3 — APPROVED 2026-10-01. Steps 1–7 done; Rosie runs `sha-822430f` (fix: dropped an unverified key-format check that refused a real key). Verification (2026-10-02): **1 ✅** your key → ticket 47071's 21 tasks; **4 ✅** task 5589 Completed→Open→Completed, both credited to T.J. Schmitz in Freshservice Activity; **5 ✅** 0 auth headers/tokens/keys in logs, `KEY_LOOKUP result=found`. Open: 2 and 3 (volunteer), 6 (after merge).
+**Status:** REVISION 3 — APPROVED 2026-10-01. Steps 1–7 done; Rosie runs `sha-822430f` (fix: dropped an unverified key-format check that refused a real key). Verification (2026-10-02): **1 ✅** your key → ticket 47071's 21 tasks; **4 ✅** task 5589 Completed→Open→Completed, both credited to T.J. Schmitz in Freshservice Activity; **5 ✅** 0 auth headers/tokens/keys in logs, `KEY_LOOKUP result=found`; **2 ✅** an Open WebUI account with no saved key gets the "add your key" message (Controls > Valves > Tools > Freshservice Key). Open: 3 (second person's key), 6 (Unraid on new `latest`).
 **Progress:** per-user mode now serves MCP and reads each user's key from Open WebUI. `tests/test-per-user-mode.py`: 23/23 pass, using the real MCP protocol against fake Open WebUI and Freshservice. That includes the Unraid checks (shared mode: same 22 tools, still uses `FRESHSERVICE_APIKEY`). The Freshservice Key tool is in `owui/freshservice_key.py`.
 **Created:** 2026-10-01
 **Revision 3 (2026-10-01):** replaces the browser-based design. The server now runs exactly like the other MCPs on Rosie (Docker network, no ports, added in Open WebUI admin). Each user's key comes from a private per-user box in Open WebUI.
@@ -82,7 +82,7 @@ Each Open WebUI user's Freshservice tool calls run with **the API key that user 
 - A shared or service key on the Rosie container. It must not have `FRESHSERVICE_APIKEY`, and refuses to start if it's set.
 - Anyone collecting or entering other users' keys.
 - Logging a key or a login pass.
-- Any write tool except `update_ticket_task_status` (sets a task to open or completed, nothing else, per-user mode only).
+- Any write tool except `update_ticket_task_status` (sets a task to open or completed, nothing else, per-user mode only) and `complete_term_tasks` (added by PROJECT-term-tasks-skill.md, approved 2026-10-02; per-user mode only).
 - Changing how the Unraid server behaves. Its tool list stays at the same 22 read tools.
 
 ### 4. Deployment target and backup

@@ -271,6 +271,7 @@ ALLOWED_WRITE_TOOLS = set()
 PER_USER_WRITE_TOOLS = {
     # Ticket Tasks
     "update_ticket_task_status",
+    "complete_term_tasks",
 }
 
 DISABLED_WRITE_TOOLS = {
@@ -1872,6 +1873,119 @@ async def update_ticket_task_status(ticket_id: int, task_id: int, status: Litera
                 return {"error": f"Failed to update ticket task: {str(e)}"}
         except Exception as e:
             return {"error": f"An unexpected error occurred: {str(e)}"}
+
+#COMPLETE TERM TASKS
+# The termination tasks this tool may complete, by system, matched by exact
+# title. They come from the HR Separation task template (verified on tickets
+# 47071 and 47146). AD is deliberately absent: it is never touched.
+TERM_TASK_TITLES = {
+    "SAP": "Termination of SAP Access",
+    "Titan": "Terminate Titan Access",
+    "Qlik": "Terminate QlikSense Access",
+}
+TERM_TICKET_CATEGORY = ("human resources", "separation")
+TICKET_TYPE_PREFIX = {"incident": "INC", "service request": "SR"}
+
+@allowed_tool()
+async def complete_term_tasks(
+    ticket_id: int,
+    employee_id: str,
+    systems_without_account: List[Literal["SAP", "Titan", "Qlik"]],
+    preview: bool = False,
+    employee_confirmed: bool = False,
+) -> Dict[str, Any]:
+    """Complete a term (HR Separation) ticket's SAP, Titan and Qlik termination tasks for the systems where the employee has NO account. Run the employee-ID lookup first; systems_without_account = the systems among SAP, Titan and Qlik that had no row in it (never AD). preview=true reports what would happen and changes nothing. Set employee_confirmed=true only after the user explicitly confirms the employee ID is right for this ticket, when this tool said the ID isn't on the ticket. Print the returned lines exactly as given."""
+    employee_digits = employee_id.strip().lstrip("#")
+    if not employee_digits.isdigit():
+        return {"error": f"Employee ID must be a number, got {employee_id!r}. Nothing was changed."}
+    employee_number = int(employee_digits)
+
+    base = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}"
+    headers = get_auth_headers()
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(base, headers=headers)
+            response.raise_for_status()
+            ticket = response.json()["ticket"]
+        except httpx.HTTPStatusError as e:
+            return {"error": f"Couldn't read ticket {ticket_id}: {str(e)}. Nothing was changed."}
+        except Exception as e:
+            return {"error": f"Couldn't read ticket {ticket_id}: {str(e)}. Nothing was changed."}
+
+        prefix = TICKET_TYPE_PREFIX.get((ticket.get("type") or "").strip().lower())
+        ticket_label = f"Ticket #{prefix}-{ticket_id}" if prefix else f"Ticket #{ticket_id}"
+        ticket_url = f"https://{FRESHSERVICE_DOMAIN}/a/tickets/{ticket_id}"
+        ticket_link = f"[{ticket_label}]({ticket_url})"
+        tasks_url = f"{ticket_url}?current_tab=tasks"
+
+        category = ((ticket.get("category") or "").strip().lower(), (ticket.get("sub_category") or "").strip().lower())
+        if category != TERM_TICKET_CATEGORY:
+            return {
+                "error": f"{ticket_label} is not an HR Separation ticket "
+                f"({ticket.get('category')} / {ticket.get('sub_category')}). Nothing was changed."
+            }
+
+        # Typo guard: the employee number should appear somewhere on the ticket.
+        ticket_text = f"{ticket.get('subject') or ''}\n{ticket.get('description_text') or ''}"
+        numbers_on_ticket = {int(n) for n in re.findall(r"\d+", ticket_text)}
+        if employee_number not in numbers_on_ticket and not employee_confirmed:
+            return {
+                "needs_confirmation": True,
+                "lines": [
+                    f"Employee ID {employee_digits} isn't on {ticket_link} "
+                    f"(subject: \"{(ticket.get('subject') or '').strip()}\"). Nothing was changed. "
+                    "If it's the right ticket, confirm and ask again."
+                ],
+            }
+
+        tasks: List[Dict[str, Any]] = []
+        try:
+            url: Optional[str] = f"{base}/tasks"
+            for _ in range(10):  # follow Freshservice's Link header, bounded
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                tasks.extend(t for t in response.json().get("tasks", []) if not t.get("deleted"))
+                url = response.links.get("next", {}).get("url")
+                if not url:
+                    break
+        except Exception as e:
+            return {"error": f"Couldn't read the tasks on {ticket_label}: {str(e)}. Nothing was changed."}
+
+        missing = set(systems_without_account)
+        lines: List[str] = []
+        changed: List[int] = []
+        for system, title in TERM_TASK_TITLES.items():
+            matches = [t for t in tasks if (t.get("title") or "").strip().lower() == title.lower()]
+            if not matches:
+                lines.append(f"No \"{title}\" task on {ticket_link}; nothing changed for {system}.")
+                continue
+            if len(matches) > 1:
+                lines.append(f"More than one \"{title}\" task on {ticket_link}; nothing changed for {system}.")
+                continue
+
+            task = matches[0]
+            task_link = f"[Task #TSK-{task['id']}]({tasks_url})"
+            if task.get("status") == TICKET_TASK_STATUS["completed"]:
+                lines.append(f"{task_link} on {ticket_link} was already completed.")
+            elif system not in missing:
+                lines.append(f"{task_link} left open: {system} account exists.")
+            elif preview:
+                lines.append(f"Preview: would complete {task_link} on {ticket_link} as no {system} account exists.")
+            else:
+                try:
+                    response = await client.put(
+                        f"{base}/tasks/{task['id']}",
+                        headers=headers,
+                        json={"status": TICKET_TASK_STATUS["completed"]},
+                    )
+                    response.raise_for_status()
+                    changed.append(task["id"])
+                    lines.append(f"{task_link} on {ticket_link} completed as no {system} account exists.")
+                except Exception as e:
+                    lines.append(f"Couldn't complete {task_link} on {ticket_link}: {str(e)}")
+
+        return {"preview": preview, "completed_task_ids": changed, "lines": lines}
 
 #GET ALL PRODUCTS
 @allowed_tool()

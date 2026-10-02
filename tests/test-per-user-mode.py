@@ -55,6 +55,38 @@ def key_label(auth):
 outbound = []  # every request that left the server
 
 
+def term_ticket(subject, tasks, category="Human Resources", sub_category="Separation", type_="Incident", text=""):
+    return {"subject": subject, "description_text": text, "category": category,
+            "sub_category": sub_category, "type": type_, "tasks": tasks}
+
+
+def task(task_id, title, status=1):
+    return {"id": task_id, "title": title, "status": status, "deleted": False}
+
+
+def term_template(first_id):
+    """The HR Separation template's tasks that matter here, plus AD."""
+    return [
+        task(first_id, "Active Directory Access"),
+        task(first_id + 1, "Termination of SAP Access"),
+        task(first_id + 2, "Terminate QlikSense Access"),
+        task(first_id + 3, "Terminate Titan Access"),
+        task(first_id + 4, "Ninja Remote Access"),
+    ]
+
+
+# Freshservice tickets the fake knows. Each term test uses its own ticket.
+TICKETS = {
+    60001: term_ticket("Urgent please turn off all access Jane Doe #11116", term_template(7001)),
+    60002: term_ticket("New monitor", term_template(7101), category="Hardware", sub_category="Monitor"),
+    60003: term_ticket("Please terminate Sam Roe", term_template(7201)),
+    60004: term_ticket("Terminate an Employee transaction for Pat Poe 37",
+                       [task(7301, "Termination of SAP Access"), task(7302, "Termination of SAP Access"),
+                        task(7303, "Terminate Titan Access", status=3)], type_="Service Request"),
+    60005: term_ticket("Terminate Lee Moe 4242", term_template(7401)),
+}
+
+
 async def fake_upstreams(request: httpx.Request) -> httpx.Response:
     await asyncio.sleep(0.005)  # let concurrent calls interleave
     auth = request.headers.get("authorization", "")
@@ -75,13 +107,23 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
     if host == "example.freshservice.com":
         if auth not in (basic(KEY_A), basic(KEY_B)):
             return httpx.Response(401, json={"message": "invalid credentials"})
-        path = request.url.path
-        if request.method == "GET" and path.endswith("/tasks"):
+        parts = request.url.path.strip("/").split("/")  # api v2 tickets <id> [tasks [<task id>]]
+        ticket = TICKETS.get(int(parts[3])) if len(parts) > 3 and parts[3].isdigit() else None
+        if request.method == "GET" and len(parts) == 4:
+            if ticket is None:
+                return httpx.Response(404, json={"message": "not found"})
+            return httpx.Response(200, json={"ticket": {k: v for k, v in ticket.items() if k != "tasks"}})
+        if request.method == "GET" and parts[-1] == "tasks":
             # Report which key was used by label, never the key itself, so the
             # result can be asserted on without the key showing up in logs.
-            return httpx.Response(200, json={"tasks": [], "seen_key": key_label(auth)})
-        if request.method == "PUT" and "/tasks/" in path:
-            return httpx.Response(200, json={"task": {"id": int(path.rsplit("/", 1)[1]), "status": body["status"]}})
+            tasks = ticket["tasks"] if ticket else []
+            return httpx.Response(200, json={"tasks": tasks, "seen_key": key_label(auth)})
+        if request.method == "PUT" and len(parts) == 6 and parts[4] == "tasks":
+            task_id = int(parts[5])
+            for task in (ticket or {}).get("tasks", []):
+                if task["id"] == task_id:
+                    task.update(body)
+            return httpx.Response(200, json={"task": {"id": task_id, "status": body["status"]}})
         return httpx.Response(404, json={"message": "not found"})
 
     return httpx.Response(599, json={"message": f"unexpected host {host}"})
@@ -114,7 +156,7 @@ from mcp import types  # noqa: E402
 
 from freshservice_mcp import per_user, server  # noqa: E402
 
-EXPECTED_TOOLS = server.READONLY_TOOLS | {"update_ticket_task_status"}
+EXPECTED_TOOLS = server.READONLY_TOOLS | {"update_ticket_task_status", "complete_term_tasks"}
 APP = server.build_per_user_app(OWUI_URL)
 
 
@@ -177,7 +219,7 @@ async def mcp_tests(results):
             async def healthz_needs_no_token():
                 r = await client.get("/healthz")
                 assert r.status_code == 200, r.text
-                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 23}, r.json()
+                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 24}, r.json()
 
             async def tool_list_is_exactly_the_per_user_tools():
                 result = await mcp_request(client, None, "tools/list")
@@ -286,6 +328,104 @@ async def mcp_tests(results):
                     assert is_error, (status, text)
                     assert not since(mark, FS, "PUT"), f"status {status!r} reached Freshservice"
 
+            # --- complete_term_tasks ---
+            URL = "https://example.freshservice.com/a/tickets"
+
+            async def term(**arguments):
+                is_error, text = await call_tool(client, "tok-a", "complete_term_tasks", arguments)
+                return is_error, (text if is_error else json.loads(text))
+
+            def statuses(ticket_id):
+                return {t["id"]: t["status"] for t in TICKETS[ticket_id]["tasks"]}
+
+            async def term_preview_changes_nothing():
+                mark = len(outbound)
+                is_error, r = await term(ticket_id=60001, employee_id="11116",
+                                         systems_without_account=["Titan", "Qlik"], preview=True)
+                assert not is_error, r
+                assert not since(mark, FS, "PUT"), "preview changed a task"
+                assert r["completed_task_ids"] == [], r
+                assert r["lines"] == [
+                    f"[Task #TSK-7002]({URL}/60001?current_tab=tasks) left open: SAP account exists.",
+                    f"Preview: would complete [Task #TSK-7004]({URL}/60001?current_tab=tasks) on [Ticket #INC-60001]({URL}/60001) as no Titan account exists.",
+                    f"Preview: would complete [Task #TSK-7003]({URL}/60001?current_tab=tasks) on [Ticket #INC-60001]({URL}/60001) as no Qlik account exists.",
+                ], r["lines"]
+
+            async def term_completes_only_systems_without_an_account():
+                mark = len(outbound)
+                is_error, r = await term(ticket_id=60001, employee_id="11116", systems_without_account=["Titan", "Qlik"])
+                assert not is_error, r
+                puts = since(mark, FS, "PUT")
+                assert sorted(p["path"] for p in puts) == [
+                    "/api/v2/tickets/60001/tasks/7003", "/api/v2/tickets/60001/tasks/7004"], puts
+                assert all(p["body"] == {"status": 3} and p["auth"] == basic(KEY_A) for p in puts), puts
+                assert r["lines"] == [
+                    f"[Task #TSK-7002]({URL}/60001?current_tab=tasks) left open: SAP account exists.",
+                    f"[Task #TSK-7004]({URL}/60001?current_tab=tasks) on [Ticket #INC-60001]({URL}/60001) completed as no Titan account exists.",
+                    f"[Task #TSK-7003]({URL}/60001?current_tab=tasks) on [Ticket #INC-60001]({URL}/60001) completed as no Qlik account exists.",
+                ], r["lines"]
+                # AD, SAP and every other task untouched.
+                assert statuses(60001) == {7001: 1, 7002: 1, 7003: 3, 7004: 3, 7005: 1}, statuses(60001)
+
+            async def term_second_run_reports_already_completed():
+                mark = len(outbound)
+                is_error, r = await term(ticket_id=60001, employee_id="11116", systems_without_account=["Titan", "Qlik"])
+                assert not since(mark, FS, "PUT"), "a completed task was changed again"
+                assert r["lines"][1].endswith("was already completed."), r["lines"]
+                assert r["lines"][2].endswith("was already completed."), r["lines"]
+
+            async def term_refuses_a_ticket_that_is_not_hr_separation():
+                mark = len(outbound)
+                is_error, r = await term(ticket_id=60002, employee_id="11116", systems_without_account=["SAP"])
+                assert "is not an HR Separation ticket" in r["error"], r
+                assert not since(mark, FS, "PUT")
+                assert statuses(60002) == {t: 1 for t in range(7101, 7106)}
+
+            async def term_asks_when_the_employee_id_is_not_on_the_ticket():
+                mark = len(outbound)
+                is_error, r = await term(ticket_id=60003, employee_id="11116", systems_without_account=["SAP"])
+                assert r.get("needs_confirmation") is True, r
+                assert "isn't on" in r["lines"][0], r
+                assert not since(mark, FS, "PUT")
+                # The user confirms: now it proceeds.
+                is_error, r = await term(ticket_id=60003, employee_id="11116",
+                                         systems_without_account=["SAP"], employee_confirmed=True)
+                assert r["completed_task_ids"] == [7202], r
+                assert statuses(60003) == {7201: 1, 7202: 3, 7203: 1, 7204: 1, 7205: 1}, statuses(60003)
+
+            async def term_matches_employee_id_ignoring_leading_zeros():
+                mark = len(outbound)
+                is_error, r = await term(ticket_id=60005, employee_id="0004242", systems_without_account=[])
+                assert "needs_confirmation" not in r, r
+                assert [line.split(" left open: ")[1] for line in r["lines"]] == [
+                    "SAP account exists.", "Titan account exists.", "Qlik account exists."], r["lines"]
+                assert not since(mark, FS, "PUT")
+
+            async def term_reports_duplicate_missing_and_done_tasks_without_changes():
+                mark = len(outbound)
+                is_error, r = await term(ticket_id=60004, employee_id="37",
+                                         systems_without_account=["SAP", "Titan", "Qlik"])
+                assert not since(mark, FS, "PUT"), "a duplicate, missing or completed task was changed"
+                assert r["lines"] == [
+                    f"More than one \"Termination of SAP Access\" task on [Ticket #SR-60004]({URL}/60004); nothing changed for SAP.",
+                    f"[Task #TSK-7303]({URL}/60004?current_tab=tasks) on [Ticket #SR-60004]({URL}/60004) was already completed.",
+                    f"No \"Terminate QlikSense Access\" task on [Ticket #SR-60004]({URL}/60004); nothing changed for Qlik.",
+                ], r["lines"]
+
+            async def term_never_accepts_ad():
+                mark = len(outbound)
+                is_error, text = await call_tool(client, "tok-a", "complete_term_tasks",
+                                                 {"ticket_id": 60005, "employee_id": "4242",
+                                                  "systems_without_account": ["AD"]})
+                assert is_error, text
+                assert not since(mark, FS), "a request with AD reached Freshservice"
+
+            async def term_rejects_a_non_numeric_employee_id():
+                mark = len(outbound)
+                is_error, r = await term(ticket_id=60005, employee_id="abc", systems_without_account=["SAP"])
+                assert "must be a number" in r["error"], r
+                assert not since(mark, FS), "Freshservice was called for a bad employee ID"
+
             for fn in [
                 healthz_needs_no_token,
                 tool_list_is_exactly_the_per_user_tools,
@@ -302,6 +442,15 @@ async def mcp_tests(results):
                 unknown_and_disabled_tools_never_reach_freshservice,
                 task_status_sends_only_the_status,
                 task_status_refuses_anything_but_open_or_completed,
+                term_preview_changes_nothing,
+                term_completes_only_systems_without_an_account,
+                term_second_run_reports_already_completed,
+                term_refuses_a_ticket_that_is_not_hr_separation,
+                term_asks_when_the_employee_id_is_not_on_the_ticket,
+                term_matches_employee_id_ignoring_leading_zeros,
+                term_reports_duplicate_missing_and_done_tasks_without_changes,
+                term_never_accepts_ad,
+                term_rejects_a_non_numeric_employee_id,
             ]:
                 await asyncio.wait_for(check(fn.__name__, fn()), timeout=60)
 
@@ -349,6 +498,7 @@ def test_shared_mode_tool_list_is_unchanged():
     assert registered == readonly, set(registered) ^ set(readonly)
     assert len(registered) == 22, len(registered)
     assert "update_ticket_task_status" not in registered
+    assert "complete_term_tasks" not in registered
 
 
 def test_shared_mode_still_uses_the_shared_key():

@@ -187,9 +187,18 @@ never reaches Freshservice; whether a key is valid is left to Freshservice.
 4. Each user, once: in a chat, **Controls → Valves → Tools → Freshservice Key**,
    paste their Freshservice API key.
 
-It registers the read tools plus one write tool, `update_ticket_task_status`
-(sets a ticket task to `open` or `completed`, nothing else). That tool is
-**never** registered in `shared` mode.
+It registers the read tools plus two write tools, **never** registered in
+`shared` mode:
+
+- `update_ticket_task_status`: sets a ticket task to `open` or `completed`,
+  nothing else.
+- `complete_term_tasks`: on an HR **Separation** ticket, completes the
+  `Termination of SAP Access`, `Terminate Titan Access` and
+  `Terminate QlikSense Access` tasks for the systems the employee has no
+  account in, and returns report lines with links. It refuses other tickets,
+  asks for confirmation when the employee ID isn't on the ticket, never touches
+  AD or any other task, and has a `preview` mode that changes nothing. The Open
+  WebUI skill that drives it is [`owui/term-tasks-skill.md`](owui/term-tasks-skill.md).
 
 ## How the Allowlist Works
 
