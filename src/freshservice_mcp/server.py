@@ -5,6 +5,7 @@ import logging
 import base64
 import json
 import urllib.parse
+from html import escape as html_escape
 from typing import Optional, Dict, Union, Any, List, Literal
 import uvicorn
 from mcp import types
@@ -272,6 +273,8 @@ PER_USER_WRITE_TOOLS = {
     # Ticket Tasks
     "update_ticket_task_status",
     "complete_term_tasks",
+    # Ticket Conversations
+    "create_ticket_note",
 }
 
 DISABLED_WRITE_TOOLS = {
@@ -281,7 +284,6 @@ DISABLED_WRITE_TOOLS = {
     "delete_ticket",
     # Ticket Conversations
     "send_ticket_reply",
-    "create_ticket_note",
     "update_ticket_conversation",
     # Service Catalog
     "create_service_request",
@@ -1761,19 +1763,57 @@ async def send_ticket_reply(
         except Exception as e:
             return {"success": False, "error": f"An unexpected error occurred: {str(e)}"}
 
+TICKET_TYPE_PREFIX = {"incident": "INC", "service request": "SR"}
+
+def _ticket_link(ticket_id: int, ticket_type: Optional[str]) -> str:
+    """A Markdown link to the ticket, labelled the way Freshservice shows it (#INC-123)."""
+    prefix = TICKET_TYPE_PREFIX.get((ticket_type or "").strip().lower())
+    label = f"Ticket #{prefix}-{ticket_id}" if prefix else f"Ticket #{ticket_id}"
+    return f"[{label}](https://{FRESHSERVICE_DOMAIN}/a/tickets/{ticket_id})"
+
+async def _post_ticket_note(client: httpx.AsyncClient, headers: Dict[str, str], ticket_id: int, text: str, private: bool) -> Dict[str, Any]:
+    """Add a plain-text note. The private flag is always sent: Freshservice's default is not relied on."""
+    body = html_escape(text).replace("\r\n", "\n").replace("\n", "<br>")
+    response = await client.post(
+        f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}/notes",
+        headers=headers,
+        json={"body": body, "private": private},
+    )
+    response.raise_for_status()
+    return response.json().get("conversation") or {}
+
+def _note_line(note: Dict[str, Any], private: bool, ticket_link: str) -> str:
+    """Report the note as Freshservice actually saved it, not as it was requested."""
+    saved_private = note.get("private")
+    if saved_private is not None and bool(saved_private) != private:
+        saved = "private" if saved_private else "PUBLIC"
+        return f"The note was added to {ticket_link}, but Freshservice saved it as {saved}, not as asked. Check it in Freshservice."
+    return f"{'Private' if private else 'Public'} note added to {ticket_link}."
+
 #CREATE A Note
 @allowed_tool()
-async def create_ticket_note(ticket_id: int,body: str)-> Dict[str, Any]:
-    """Create a note for a ticket in Freshservice."""
-    url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}/notes"
+async def create_ticket_note(ticket_id: int, body: str, private: bool = True) -> Dict[str, Any]:
+    """Add a note to a Freshservice ticket, written as the person asking. Notes are PRIVATE (agents only) unless the user explicitly asks for a public note; a public note is visible to the ticket's requester. body is plain text; line breaks are kept. Print the returned line."""
+    text = body.strip()
+    if not text:
+        return {"error": "The note is empty. Nothing was added."}
+
     headers = get_auth_headers()
-    data = {
-        "body": body
-    }
     async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers, json=data)
-        return response.json()
-    
+        try:
+            response = await client.get(f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}", headers=headers)
+            response.raise_for_status()
+            ticket_link = _ticket_link(ticket_id, response.json()["ticket"].get("type"))
+        except Exception as e:
+            return {"error": f"Couldn't read ticket {ticket_id}: {str(e)}. Nothing was added."}
+
+        try:
+            note = await _post_ticket_note(client, headers, ticket_id, text, private)
+        except Exception as e:
+            return {"error": f"Couldn't add the note to {ticket_link}: {str(e)}"}
+
+    return {"note_id": note.get("id"), "private": note.get("private", private), "line": _note_line(note, private, ticket_link)}
+
  #UPDATE A CONVERSATION
 
 #UPDATE TICKET CONVERSATION
@@ -1884,7 +1924,6 @@ TERM_TASK_TITLES = {
     "Qlik": "Terminate QlikSense Access",
 }
 TERM_TICKET_CATEGORY = ("human resources", "separation")
-TICKET_TYPE_PREFIX = {"incident": "INC", "service request": "SR"}
 
 @allowed_tool()
 async def complete_term_tasks(
@@ -1985,7 +2024,21 @@ async def complete_term_tasks(
                 except Exception as e:
                     lines.append(f"Couldn't complete {task_link} on {ticket_link}: {str(e)}")
 
-        return {"preview": preview, "completed_task_ids": changed, "lines": lines}
+        # Record the outcome on the ticket: one private "No <system> account" line
+        # per system without an account. Nothing to record if they have all three.
+        note_added = False
+        note_lines = [f"No {system} account" for system in TERM_TASK_TITLES if system in missing]
+        if note_lines and preview:
+            lines.append(f"Preview: would add a private note to {ticket_link}: {'; '.join(note_lines)}.")
+        elif note_lines:
+            try:
+                note = await _post_ticket_note(client, headers, ticket_id, "\n".join(note_lines), private=True)
+                note_added = True
+                lines.append(_note_line(note, True, ticket_link))
+            except Exception as e:
+                lines.append(f"Couldn't add the note to {ticket_link}: {str(e)}")
+
+        return {"preview": preview, "completed_task_ids": changed, "note_added": note_added, "lines": lines}
 
 #GET ALL PRODUCTS
 @allowed_tool()

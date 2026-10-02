@@ -84,6 +84,8 @@ TICKETS = {
                        [task(7301, "Termination of SAP Access"), task(7302, "Termination of SAP Access"),
                         task(7303, "Terminate Titan Access", status=3)], type_="Service Request"),
     60005: term_ticket("Terminate Lee Moe 4242", term_template(7401)),
+    60006: term_ticket("Printer jam", [], category="Hardware", sub_category="Printer"),
+    60007: {**term_ticket("Printer jam again", [], category="Hardware", sub_category="Printer"), "forces_public": True},
 }
 
 
@@ -118,6 +120,13 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
             # result can be asserted on without the key showing up in logs.
             tasks = ticket["tasks"] if ticket else []
             return httpx.Response(200, json={"tasks": tasks, "seen_key": key_label(auth)})
+        if request.method == "POST" and len(parts) == 5 and parts[4] == "notes":
+            if ticket is None:
+                return httpx.Response(404, json={"message": "not found"})
+            # Mirror the worst case: a note with no flag comes back public.
+            saved_private = body.get("private", False) and not ticket.get("forces_public")
+            return httpx.Response(201, json={"conversation": {
+                "id": 9000 + len(outbound), "private": saved_private, "body": body["body"], "ticket_id": int(parts[3])}})
         if request.method == "PUT" and len(parts) == 6 and parts[4] == "tasks":
             task_id = int(parts[5])
             for task in (ticket or {}).get("tasks", []):
@@ -156,7 +165,7 @@ from mcp import types  # noqa: E402
 
 from freshservice_mcp import per_user, server  # noqa: E402
 
-EXPECTED_TOOLS = server.READONLY_TOOLS | {"update_ticket_task_status", "complete_term_tasks"}
+EXPECTED_TOOLS = server.READONLY_TOOLS | {"update_ticket_task_status", "complete_term_tasks", "create_ticket_note"}
 APP = server.build_per_user_app(OWUI_URL)
 
 
@@ -219,7 +228,7 @@ async def mcp_tests(results):
             async def healthz_needs_no_token():
                 r = await client.get("/healthz")
                 assert r.status_code == 200, r.text
-                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 24}, r.json()
+                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 25}, r.json()
 
             async def tool_list_is_exactly_the_per_user_tools():
                 result = await mcp_request(client, None, "tools/list")
@@ -344,11 +353,13 @@ async def mcp_tests(results):
                                          systems_without_account=["Titan", "Qlik"], preview=True)
                 assert not is_error, r
                 assert not since(mark, FS, "PUT"), "preview changed a task"
-                assert r["completed_task_ids"] == [], r
+                assert not since(mark, FS, "POST"), "preview added a note"
+                assert r["completed_task_ids"] == [] and r["note_added"] is False, r
                 assert r["lines"] == [
                     f"[Task #TSK-7002]({URL}/60001?current_tab=tasks) left open: SAP account exists.",
                     f"Preview: would complete [Task #TSK-7004]({URL}/60001?current_tab=tasks) on [Ticket #INC-60001]({URL}/60001) as no Titan account exists.",
                     f"Preview: would complete [Task #TSK-7003]({URL}/60001?current_tab=tasks) on [Ticket #INC-60001]({URL}/60001) as no Qlik account exists.",
+                    f"Preview: would add a private note to [Ticket #INC-60001]({URL}/60001): No Titan account; No Qlik account.",
                 ], r["lines"]
 
             async def term_completes_only_systems_without_an_account():
@@ -363,7 +374,12 @@ async def mcp_tests(results):
                     f"[Task #TSK-7002]({URL}/60001?current_tab=tasks) left open: SAP account exists.",
                     f"[Task #TSK-7004]({URL}/60001?current_tab=tasks) on [Ticket #INC-60001]({URL}/60001) completed as no Titan account exists.",
                     f"[Task #TSK-7003]({URL}/60001?current_tab=tasks) on [Ticket #INC-60001]({URL}/60001) completed as no Qlik account exists.",
+                    f"Private note added to [Ticket #INC-60001]({URL}/60001).",
                 ], r["lines"]
+                notes = since(mark, FS, "POST")
+                assert [(n["path"], n["body"]) for n in notes] == [
+                    ("/api/v2/tickets/60001/notes", {"body": "No Titan account<br>No Qlik account", "private": True})], notes
+                assert notes[0]["auth"] == basic(KEY_A)
                 # AD, SAP and every other task untouched.
                 assert statuses(60001) == {7001: 1, 7002: 1, 7003: 3, 7004: 3, 7005: 1}, statuses(60001)
 
@@ -378,7 +394,7 @@ async def mcp_tests(results):
                 mark = len(outbound)
                 is_error, r = await term(ticket_id=60002, employee_id="11116", systems_without_account=["SAP"])
                 assert "is not an HR Separation ticket" in r["error"], r
-                assert not since(mark, FS, "PUT")
+                assert not since(mark, FS, "PUT") and not since(mark, FS, "POST")
                 assert statuses(60002) == {t: 1 for t in range(7101, 7106)}
 
             async def term_asks_when_the_employee_id_is_not_on_the_ticket():
@@ -386,11 +402,12 @@ async def mcp_tests(results):
                 is_error, r = await term(ticket_id=60003, employee_id="11116", systems_without_account=["SAP"])
                 assert r.get("needs_confirmation") is True, r
                 assert "isn't on" in r["lines"][0], r
-                assert not since(mark, FS, "PUT")
+                assert not since(mark, FS, "PUT") and not since(mark, FS, "POST")
                 # The user confirms: now it proceeds.
                 is_error, r = await term(ticket_id=60003, employee_id="11116",
                                          systems_without_account=["SAP"], employee_confirmed=True)
                 assert r["completed_task_ids"] == [7202], r
+                assert since(mark, FS, "POST")[-1]["body"] == {"body": "No SAP account", "private": True}
                 assert statuses(60003) == {7201: 1, 7202: 3, 7203: 1, 7204: 1, 7205: 1}, statuses(60003)
 
             async def term_matches_employee_id_ignoring_leading_zeros():
@@ -400,6 +417,7 @@ async def mcp_tests(results):
                 assert [line.split(" left open: ")[1] for line in r["lines"]] == [
                     "SAP account exists.", "Titan account exists.", "Qlik account exists."], r["lines"]
                 assert not since(mark, FS, "PUT")
+                assert not since(mark, FS, "POST") and r["note_added"] is False, "a note was added though every account exists"
 
             async def term_reports_duplicate_missing_and_done_tasks_without_changes():
                 mark = len(outbound)
@@ -410,7 +428,10 @@ async def mcp_tests(results):
                     f"More than one \"Termination of SAP Access\" task on [Ticket #SR-60004]({URL}/60004); nothing changed for SAP.",
                     f"[Task #TSK-7303]({URL}/60004?current_tab=tasks) on [Ticket #SR-60004]({URL}/60004) was already completed.",
                     f"No \"Terminate QlikSense Access\" task on [Ticket #SR-60004]({URL}/60004); nothing changed for Qlik.",
+                    f"Private note added to [Ticket #SR-60004]({URL}/60004).",
                 ], r["lines"]
+                assert since(mark, FS, "POST")[-1]["body"] == {
+                    "body": "No SAP account<br>No Titan account<br>No Qlik account", "private": True}
 
             async def term_never_accepts_ad():
                 mark = len(outbound)
@@ -419,6 +440,45 @@ async def mcp_tests(results):
                                                   "systems_without_account": ["AD"]})
                 assert is_error, text
                 assert not since(mark, FS), "a request with AD reached Freshservice"
+
+            # --- create_ticket_note ---
+            async def note(**arguments):
+                is_error, text = await call_tool(client, "tok-a", "create_ticket_note", arguments)
+                return is_error, (text if is_error else json.loads(text))
+
+            async def note_is_private_by_default():
+                mark = len(outbound)
+                is_error, r = await note(ticket_id=60006, body="Called the manager, laptop pickup Friday")
+                assert not is_error, r
+                posts = since(mark, FS, "POST")
+                assert [p["body"] for p in posts] == [
+                    {"body": "Called the manager, laptop pickup Friday", "private": True}], posts
+                assert posts[0]["auth"] == basic(KEY_A)
+                assert r["line"] == f"Private note added to [Ticket #INC-60006]({URL}/60006).", r
+
+            async def note_is_public_only_when_asked():
+                mark = len(outbound)
+                is_error, r = await note(ticket_id=60006, body="Your laptop is ready", private=False)
+                assert [p["body"]["private"] for p in since(mark, FS, "POST")] == [False]
+                assert r["line"] == f"Public note added to [Ticket #INC-60006]({URL}/60006).", r
+
+            async def note_text_is_escaped_and_keeps_line_breaks():
+                mark = len(outbound)
+                await note(ticket_id=60006, body="<b>bold?</b> a & b\nsecond line\r\nthird")
+                assert since(mark, FS, "POST")[0]["body"]["body"] == (
+                    "&lt;b&gt;bold?&lt;/b&gt; a &amp; b<br>second line<br>third")
+
+            async def note_refuses_empty_text_and_missing_tickets():
+                mark = len(outbound)
+                is_error, r = await note(ticket_id=60006, body="   ")
+                assert "empty" in r["error"], r
+                is_error, r = await note(ticket_id=99999, body="hello")
+                assert "Couldn't read ticket 99999" in r["error"], r
+                assert not since(mark, FS, "POST"), "a note was posted anyway"
+
+            async def note_reports_what_freshservice_actually_saved():
+                is_error, r = await note(ticket_id=60007, body="should be private")
+                assert "saved it as PUBLIC, not as asked" in r["line"], r
 
             async def term_rejects_a_non_numeric_employee_id():
                 mark = len(outbound)
@@ -451,6 +511,11 @@ async def mcp_tests(results):
                 term_reports_duplicate_missing_and_done_tasks_without_changes,
                 term_never_accepts_ad,
                 term_rejects_a_non_numeric_employee_id,
+                note_is_private_by_default,
+                note_is_public_only_when_asked,
+                note_text_is_escaped_and_keeps_line_breaks,
+                note_refuses_empty_text_and_missing_tickets,
+                note_reports_what_freshservice_actually_saved,
             ]:
                 await asyncio.wait_for(check(fn.__name__, fn()), timeout=60)
 
@@ -499,6 +564,7 @@ def test_shared_mode_tool_list_is_unchanged():
     assert len(registered) == 22, len(registered)
     assert "update_ticket_task_status" not in registered
     assert "complete_term_tasks" not in registered
+    assert "create_ticket_note" not in registered
 
 
 def test_shared_mode_still_uses_the_shared_key():

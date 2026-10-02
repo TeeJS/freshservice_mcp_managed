@@ -187,7 +187,7 @@ never reaches Freshservice; whether a key is valid is left to Freshservice.
 4. Each user, once: in a chat, **Controls → Valves → Tools → Freshservice Key**,
    paste their Freshservice API key.
 
-It registers the read tools plus two write tools, **never** registered in
+It registers the read tools plus three write tools, **never** registered in
 `shared` mode:
 
 - `update_ticket_task_status`: sets a ticket task to `open` or `completed`,
@@ -197,8 +197,14 @@ It registers the read tools plus two write tools, **never** registered in
   `Terminate QlikSense Access` tasks for the systems the employee has no
   account in, and returns report lines with links. It refuses other tickets,
   asks for confirmation when the employee ID isn't on the ticket, never touches
-  AD or any other task, and has a `preview` mode that changes nothing. The Open
-  WebUI skill that drives it is [`owui/term-tasks-skill.md`](owui/term-tasks-skill.md).
+  AD or any other task, and has a `preview` mode that changes nothing. On a
+  real run it adds one private note: `No <system> account` per system without
+  an account. The Open WebUI skill that drives it is
+  [`owui/term-tasks-skill.md`](owui/term-tasks-skill.md).
+- `create_ticket_note`: adds a plain-text note (line breaks kept), **private
+  unless `private=false` is asked for**. The private flag is always sent, never
+  left to Freshservice's default, and the result reports how Freshservice
+  actually saved the note.
 
 ## How the Allowlist Works
 
