@@ -48,10 +48,14 @@ docker run -d \
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `FRESHSERVICE_APIKEY` | Yes | -- | Your Freshservice API key |
+| `FRESHSERVICE_APIKEY` | Yes\*\* | -- | Your Freshservice API key |
 | `FRESHSERVICE_DOMAIN` | Yes | -- | Your Freshservice domain (e.g., `yourcompany.freshservice.com`) |
+| `FRESHSERVICE_KEY_MODE` | No | `shared` | `shared` uses `FRESHSERVICE_APIKEY` for every call. `per-user` uses each Open WebUI caller's own key — see [Per-User Key Mode](#per-user-key-mode-open-webui) |
 | `MCP_PORT` | No | `8080` | Port the MCP server listens on inside the container |
 | `MCP_PATH` | No | `/mcp` | Path the MCP endpoint is served on |
+
+\*\* Required in `shared` mode. In `per-user` mode it **must not** be set, and
+the server refuses to start if it is.
 
 #### Authentication
 
@@ -144,6 +148,48 @@ mcp_servers:
     transport: streamable-http
     url: http://<your-host-ip>:8080/mcp
 ```
+
+## Per-User Key Mode (Open WebUI)
+
+With `FRESHSERVICE_KEY_MODE=per-user` the server holds **no** Freshservice key.
+Every call runs with the **calling user's own** key, so Freshservice applies
+that user's permissions and credits any change to them. There is no fallback
+to a shared key: a user without a key gets a message saying where to add it.
+
+It runs like any other MCP tool server for Open WebUI: on the Docker network,
+no published port.
+
+**How a call works**
+
+1. Open WebUI calls `/mcp`. With the tool server's Auth set to **Session**, it
+   sends the calling user's own Open WebUI login token.
+2. The server asks Open WebUI for that user's key with the same token:
+   `GET {OWUI_URL}/api/v1/tools/id/freshservice_key/valves/user`. Open WebUI
+   returns only that user's own settings.
+3. The server calls Freshservice with that key.
+
+Keys are remembered for 5 minutes in memory, under a SHA-256 hash of the login
+token. Neither keys nor tokens are logged or written to disk. A missing key
+never reaches Freshservice; whether a key is valid is left to Freshservice.
+
+**Setup**
+
+1. Container: `FRESHSERVICE_KEY_MODE=per-user`,
+   `FRESHSERVICE_DOMAIN=yourcompany.freshservice.com`,
+   `OWUI_URL=http://open-webui:8080` (Open WebUI's address on the Docker
+   network), on the same Docker network as Open WebUI, no ports.
+   `FRESHSERVICE_APIKEY` must **not** be set; the server refuses to start if it is.
+2. Open WebUI → Admin Settings → Integrations → External Tool Servers → **+**:
+   type MCP, URL `http://<container name>:8080/mcp`, Auth **Session**.
+3. Open WebUI → Workspace → Tools → **+**: paste
+   [`owui/freshservice_key.py`](owui/freshservice_key.py), ID `freshservice_key`.
+   Give the users who need Freshservice read access to it.
+4. Each user, once: in a chat, **Controls → Valves → Tools → Freshservice Key**,
+   paste their Freshservice API key.
+
+It registers the read tools plus one write tool, `update_ticket_task_status`
+(sets a ticket task to `open` or `completed`, nothing else). That tool is
+**never** registered in `shared` mode.
 
 ## How the Allowlist Works
 

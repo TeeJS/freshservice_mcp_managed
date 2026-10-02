@@ -1,0 +1,408 @@
+"""Per-user key mode tests. No Open WebUI or Freshservice connection needed.
+
+Open WebUI and Freshservice are replaced by in-memory fakes, so every outbound
+request can be inspected: which login token went to Open WebUI, which key went
+to Freshservice, what body was sent, and whether anything was sent at all.
+MCP requests go through the real app in-process; no port is opened.
+
+Run from the repo root:  PYTHONPATH=src python tests/test-per-user-mode.py
+"""
+import asyncio
+import base64
+import json
+import logging
+import os
+import subprocess
+import sys
+
+# Mode is read at import, so it must be set before the server is imported.
+os.environ["FRESHSERVICE_KEY_MODE"] = "per-user"
+os.environ["FRESHSERVICE_DOMAIN"] = "example.freshservice.com"
+os.environ.pop("FRESHSERVICE_APIKEY", None)
+
+import httpx
+
+OWUI_URL = "http://owui.test"
+KEY_A = "A" * 20
+KEY_B = "B" * 20
+KEY_REJECTED = "W" * 20  # Freshservice refuses it
+# Freshservice doesn't document its key format, so a key with other
+# characters must still be passed through for Freshservice to judge.
+KEY_UNUSUAL = "Ab-cd_ef.gh+ij/kl=mn~op"
+
+# What the fake Open WebUI returns for each login token.
+OWUI_VALVES = {
+    "tok-a": {"freshservice_api_key": KEY_A},
+    "tok-b": {"freshservice_api_key": KEY_B},
+    "tok-rejected": {"freshservice_api_key": KEY_REJECTED},
+    "tok-empty": {},
+    "tok-blank": {"freshservice_api_key": ""},
+    "tok-unusual": {"freshservice_api_key": KEY_UNUSUAL},
+}
+TOKENS = list(OWUI_VALVES) + ["tok-noaccess", "tok-tool-missing"]
+
+
+def basic(key):
+    return "Basic " + base64.b64encode(f"{key}:X".encode()).decode()
+
+
+def key_label(auth):
+    return {basic(KEY_A): "key-a", basic(KEY_B): "key-b"}.get(auth, "other")
+
+
+# --- Fake Open WebUI and Freshservice ----------------------------------------
+
+outbound = []  # every request that left the server
+
+
+async def fake_upstreams(request: httpx.Request) -> httpx.Response:
+    await asyncio.sleep(0.005)  # let concurrent calls interleave
+    auth = request.headers.get("authorization", "")
+    body = json.loads(request.content) if request.content else None
+    host = request.url.host
+    outbound.append({"host": host, "method": request.method, "path": request.url.path, "auth": auth, "body": body})
+
+    if host == "owui.test":
+        if request.url.path != "/api/v1/tools/id/freshservice_key/valves/user":
+            return httpx.Response(404, json={"detail": "not found"})
+        token = auth.removeprefix("Bearer ")
+        if token == "tok-tool-missing":
+            return httpx.Response(404, json={"detail": "We could not find what you're looking for :/"})
+        if token not in OWUI_VALVES:
+            return httpx.Response(401, json={"detail": "Not authenticated"})
+        return httpx.Response(200, json=OWUI_VALVES[token])
+
+    if host == "example.freshservice.com":
+        if auth not in (basic(KEY_A), basic(KEY_B)):
+            return httpx.Response(401, json={"message": "invalid credentials"})
+        path = request.url.path
+        if request.method == "GET" and path.endswith("/tasks"):
+            # Report which key was used by label, never the key itself, so the
+            # result can be asserted on without the key showing up in logs.
+            return httpx.Response(200, json={"tasks": [], "seen_key": key_label(auth)})
+        if request.method == "PUT" and "/tasks/" in path:
+            return httpx.Response(200, json={"task": {"id": int(path.rsplit("/", 1)[1]), "status": body["status"]}})
+        return httpx.Response(404, json={"message": "not found"})
+
+    return httpx.Response(599, json={"message": f"unexpected host {host}"})
+
+
+_RealAsyncClient = httpx.AsyncClient
+
+
+class FakeAsyncClient(_RealAsyncClient):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("transport", httpx.MockTransport(fake_upstreams))
+        super().__init__(*args, **kwargs)
+
+
+httpx.AsyncClient = FakeAsyncClient
+
+# Capture every log line so we can prove no key or token is ever written.
+log_lines = []
+
+
+class _Capture(logging.Handler):
+    def emit(self, record):
+        log_lines.append(self.format(record))
+
+
+logging.getLogger().addHandler(_Capture())
+logging.getLogger().setLevel(logging.DEBUG)
+
+from mcp import types  # noqa: E402
+
+from freshservice_mcp import per_user, server  # noqa: E402
+
+EXPECTED_TOOLS = server.READONLY_TOOLS | {"update_ticket_task_status"}
+APP = server.build_per_user_app(OWUI_URL)
+
+
+# --- A minimal MCP client over the in-process app -----------------------------
+
+def _sse_json(response):
+    for line in response.text.splitlines():
+        if line.startswith("data:"):
+            return json.loads(line[5:].strip())
+    return response.json()
+
+
+async def mcp_request(client, token, method, params=None):
+    """Open a session as the caller with ``token``, then send one request."""
+    headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    init = await client.post("/mcp", headers=headers, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": types.LATEST_PROTOCOL_VERSION, "capabilities": {},
+                   "clientInfo": {"name": "test", "version": "0"}},
+    })
+    assert init.status_code == 200, (init.status_code, init.text[:300])
+    headers["mcp-session-id"] = init.headers["mcp-session-id"]
+    headers["mcp-protocol-version"] = _sse_json(init)["result"]["protocolVersion"]
+    note = await client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    assert note.status_code == 202, note.status_code
+    r = await client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": method, "params": params or {}})
+    assert r.status_code == 200, (r.status_code, r.text[:300])
+    return _sse_json(r)["result"]
+
+
+async def call_tool(client, token, name, arguments):
+    result = await mcp_request(client, token, "tools/call", {"name": name, "arguments": arguments})
+    text = "".join(c.get("text", "") for c in result.get("content", []))
+    return result.get("isError", False), text
+
+
+def since(mark, host=None, method=None):
+    return [o for o in outbound[mark:] if (host is None or o["host"] == host) and (method is None or o["method"] == method)]
+
+
+FS = "example.freshservice.com"
+
+
+# --- MCP tests (one session manager for all of them) --------------------------
+
+async def mcp_tests(results):
+    async def check(name, coro):
+        try:
+            await coro
+            results.append((name, None))
+        except Exception as exc:
+            results.append((name, exc))
+
+    transport = httpx.ASGITransport(app=APP)
+    async with server.mcp.session_manager.run():
+        async with _RealAsyncClient(transport=transport, base_url="http://freshservice-tools:8080", timeout=20) as client:
+
+            async def healthz_needs_no_token():
+                r = await client.get("/healthz")
+                assert r.status_code == 200, r.text
+                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 23}, r.json()
+
+            async def tool_list_is_exactly_the_per_user_tools():
+                result = await mcp_request(client, None, "tools/list")
+                names = {t["name"] for t in result["tools"]}
+                assert names == EXPECTED_TOOLS, names ^ EXPECTED_TOOLS
+                for disabled in ["create_ticket", "update_ticket", "delete_ticket", "update_change_task"]:
+                    assert disabled not in names, disabled
+
+            async def each_call_uses_the_callers_own_key():
+                for token, key in [("tok-a", KEY_A), ("tok-b", KEY_B), ("tok-a", KEY_A)]:
+                    mark = len(outbound)
+                    is_error, text = await call_tool(client, token, "get_ticket_tasks", {"ticket_id": 47071})
+                    assert not is_error, text
+                    assert json.loads(text)["seen_key"] == key_label(basic(key)), text
+                    fs = since(mark, FS)
+                    assert fs and all(o["auth"] == basic(key) for o in fs), fs
+                    owui = since(mark, "owui.test")
+                    assert all(o["auth"] == f"Bearer {token}" for o in owui), owui
+
+            async def concurrent_callers_never_see_each_others_key():
+                pairs = [("tok-a", KEY_A), ("tok-b", KEY_B)] * 8
+                outcomes = await asyncio.gather(*[
+                    call_tool(client, token, "get_ticket_tasks", {"ticket_id": 47071}) for token, _ in pairs
+                ])
+                for (token, key), (is_error, text) in zip(pairs, outcomes):
+                    assert not is_error, text
+                    assert json.loads(text)["seen_key"] == key_label(basic(key)), f"{token} ran with another caller's key"
+
+            async def key_is_cached_not_fetched_every_call():
+                await call_tool(client, "tok-a", "get_ticket_tasks", {"ticket_id": 1})
+                mark = len(outbound)
+                await call_tool(client, "tok-a", "get_ticket_tasks", {"ticket_id": 1})
+                assert not since(mark, "owui.test"), "key was fetched again inside the cache window"
+
+            async def refused(token, expect_text):
+                mark = len(outbound)
+                is_error, text = await call_tool(client, token, "get_ticket_tasks", {"ticket_id": 1})
+                assert is_error, text
+                assert expect_text in text, text
+                assert not since(mark, FS), f"Freshservice was called for {token}"
+
+            async def no_login_token_is_refused():
+                mark = len(outbound)
+                await refused(None, "Auth must be set to Session")
+                assert not since(mark, "owui.test"), "Open WebUI was asked without a token"
+
+            async def missing_key_says_where_to_add_it():
+                await refused("tok-empty", "Controls > Valves > Tools > Freshservice Key")
+                await refused("tok-blank", "Controls > Valves > Tools > Freshservice Key")
+
+            async def unusual_key_is_left_for_freshservice_to_judge():
+                mark = len(outbound)
+                await call_tool(client, "tok-unusual", "get_ticket_tasks", {"ticket_id": 1})
+                fs = since(mark, FS)
+                assert fs, "a key with unusual characters was refused locally"
+                assert all(o["auth"] == basic(KEY_UNUSUAL) for o in fs), fs
+
+            async def no_access_or_expired_login_is_refused():
+                await refused("tok-noaccess", "wouldn't share")
+
+            async def missing_key_tool_is_reported():
+                await refused("tok-tool-missing", "Freshservice Key tool isn't installed")
+
+            async def empty_key_is_not_cached():
+                # A user who adds their key right after the refusal must not wait.
+                await refused("tok-empty", "Add your Freshservice API key")
+                OWUI_VALVES["tok-empty"] = {"freshservice_api_key": KEY_A}
+                try:
+                    is_error, text = await call_tool(client, "tok-empty", "get_ticket_tasks", {"ticket_id": 1})
+                    assert not is_error, text
+                finally:
+                    OWUI_VALVES["tok-empty"] = {}
+
+            async def rejected_key_returns_freshservice_error():
+                is_error, text = await call_tool(client, "tok-rejected", "get_ticket_tasks", {"ticket_id": 1})
+                assert "Failed to fetch ticket tasks" in text, text
+
+            async def unknown_and_disabled_tools_never_reach_freshservice():
+                for name in ["create_ticket", "update_ticket", "delete_ticket", "update_change_task"]:
+                    mark = len(outbound)
+                    is_error, text = await call_tool(client, "tok-a", name, {})
+                    assert is_error, (name, text)
+                    assert not since(mark, FS), f"{name} reached Freshservice"
+
+            async def task_status_sends_only_the_status():
+                for status, code in [("completed", 3), ("open", 1)]:
+                    mark = len(outbound)
+                    is_error, text = await call_tool(
+                        client, "tok-a", "update_ticket_task_status",
+                        {"ticket_id": 47071, "task_id": 5587, "status": status},
+                    )
+                    assert not is_error, text
+                    puts = since(mark, FS, "PUT")
+                    assert len(puts) == 1, puts
+                    assert puts[0]["path"] == "/api/v2/tickets/47071/tasks/5587", puts[0]["path"]
+                    assert puts[0]["body"] == {"status": code}, puts[0]["body"]
+                    assert puts[0]["auth"] == basic(KEY_A)
+
+            async def task_status_refuses_anything_but_open_or_completed():
+                for status in ["in progress", "closed", 2, 3, ""]:
+                    mark = len(outbound)
+                    is_error, text = await call_tool(
+                        client, "tok-a", "update_ticket_task_status",
+                        {"ticket_id": 47071, "task_id": 5587, "status": status},
+                    )
+                    assert is_error, (status, text)
+                    assert not since(mark, FS, "PUT"), f"status {status!r} reached Freshservice"
+
+            for fn in [
+                healthz_needs_no_token,
+                tool_list_is_exactly_the_per_user_tools,
+                each_call_uses_the_callers_own_key,
+                concurrent_callers_never_see_each_others_key,
+                key_is_cached_not_fetched_every_call,
+                no_login_token_is_refused,
+                missing_key_says_where_to_add_it,
+                unusual_key_is_left_for_freshservice_to_judge,
+                no_access_or_expired_login_is_refused,
+                missing_key_tool_is_reported,
+                empty_key_is_not_cached,
+                rejected_key_returns_freshservice_error,
+                unknown_and_disabled_tools_never_reach_freshservice,
+                task_status_sends_only_the_status,
+                task_status_refuses_anything_but_open_or_completed,
+            ]:
+                await asyncio.wait_for(check(fn.__name__, fn()), timeout=60)
+
+
+# --- Plain tests --------------------------------------------------------------
+
+def test_no_fallback_to_a_shared_key():
+    saved = server.FRESHSERVICE_APIKEY
+    server.FRESHSERVICE_APIKEY = "S" * 20  # as if one had been set anyway
+    try:
+        server.get_auth_headers()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("get_auth_headers() fell back to the shared key")
+    finally:
+        server.FRESHSERVICE_APIKEY = saved
+
+
+def test_logs_never_contain_a_key_or_token():
+    secrets = [KEY_A, KEY_B, KEY_REJECTED, KEY_UNUSUAL] + [t for t in TOKENS]
+    secrets += [basic(k).split(" ", 1)[1] for k in (KEY_A, KEY_B, KEY_REJECTED, KEY_UNUSUAL)]
+    leaked = [line for line in log_lines for s in secrets if s in line]
+    assert not leaked, leaked[:3]
+
+
+def _python(code, env_overrides, drop=()):
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env.update(env_overrides)
+    env["PYTHONPATH"] = os.path.join(os.getcwd(), "src")
+    return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+
+
+def test_shared_mode_tool_list_is_unchanged():
+    """The Unraid deployment: no FRESHSERVICE_KEY_MODE, a shared key, same 22 tools."""
+    r = _python(
+        "import json; from freshservice_mcp.server import mcp, KEY_MODE, READONLY_TOOLS;"
+        "print(json.dumps([KEY_MODE, sorted(t.name for t in mcp._tool_manager.list_tools()), sorted(READONLY_TOOLS)]))",
+        {"FRESHSERVICE_APIKEY": "S" * 20},
+        drop=("FRESHSERVICE_KEY_MODE",),
+    )
+    assert r.returncode == 0, r.stderr[-500:]
+    mode, registered, readonly = json.loads(r.stdout.strip().splitlines()[-1])
+    assert mode == "shared", mode
+    assert registered == readonly, set(registered) ^ set(readonly)
+    assert len(registered) == 22, len(registered)
+    assert "update_ticket_task_status" not in registered
+
+
+def test_shared_mode_still_uses_the_shared_key():
+    r = _python(
+        "from freshservice_mcp.server import get_auth_headers; print(get_auth_headers()['Authorization'])",
+        {"FRESHSERVICE_APIKEY": "S" * 20},
+        drop=("FRESHSERVICE_KEY_MODE",),
+    )
+    assert r.returncode == 0, r.stderr[-500:]
+    assert r.stdout.strip().splitlines()[-1] == basic("S" * 20)
+
+
+def test_per_user_mode_refuses_to_start_with_a_shared_key():
+    r = _python("from freshservice_mcp.server import main; main()",
+                {"FRESHSERVICE_APIKEY": "S" * 20, "OWUI_URL": OWUI_URL})
+    assert r.returncode == 1, (r.returncode, r.stderr[-500:])
+    assert "FRESHSERVICE_APIKEY is set" in r.stderr, r.stderr[-500:]
+
+
+def test_per_user_mode_refuses_to_start_without_a_domain():
+    r = _python("from freshservice_mcp.server import main; main()", {"OWUI_URL": OWUI_URL}, drop=("FRESHSERVICE_DOMAIN",))
+    assert r.returncode == 1, (r.returncode, r.stderr[-500:])
+    assert "FRESHSERVICE_DOMAIN is required" in r.stderr, r.stderr[-500:]
+
+
+def test_per_user_mode_refuses_to_start_without_owui_url():
+    r = _python("from freshservice_mcp.server import main; main()", {}, drop=("OWUI_URL",))
+    assert r.returncode == 1, (r.returncode, r.stderr[-500:])
+    assert "OWUI_URL is required" in r.stderr, r.stderr[-500:]
+
+
+def test_unknown_mode_refuses_to_start():
+    r = _python("from freshservice_mcp.server import main; main()", {"FRESHSERVICE_KEY_MODE": "peruser"})
+    assert r.returncode == 1, (r.returncode, r.stderr[-500:])
+    assert "is not one of" in r.stderr, r.stderr[-500:]
+
+
+if __name__ == "__main__":
+    results = []
+    asyncio.run(mcp_tests(results))
+    for name, fn in list(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                results.append((name, None))
+            except Exception as exc:
+                results.append((name, exc))
+
+    failures = 0
+    for name, exc in results:
+        if exc is None:
+            print(f"PASS: {name}")
+        else:
+            failures += 1
+            print(f"FAIL: {name}: {type(exc).__name__}: {exc}")
+    print(f"\n{len(results) - failures}/{len(results)} passed")
+    sys.exit(1 if failures else 0)

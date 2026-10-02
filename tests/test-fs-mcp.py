@@ -6,6 +6,7 @@ from freshservice_mcp.server import (
     DISABLED_READONLY_TOOLS,
     ALLOWED_WRITE_TOOLS,
     DISABLED_WRITE_TOOLS,
+    PER_USER_WRITE_TOOLS,
     _ACTIVE_TOOLS,
     mcp,
     # Read-only tools for integration testing
@@ -70,6 +71,7 @@ def test_sets_do_not_overlap():
         "READONLY_TOOLS": READONLY_TOOLS,
         "DISABLED_READONLY_TOOLS": DISABLED_READONLY_TOOLS,
         "ALLOWED_WRITE_TOOLS": ALLOWED_WRITE_TOOLS,
+        "PER_USER_WRITE_TOOLS": PER_USER_WRITE_TOOLS,
         "DISABLED_WRITE_TOOLS": DISABLED_WRITE_TOOLS,
     }
 
@@ -91,7 +93,7 @@ def test_all_decorated_functions_are_categorized():
 
     func_names = set(re.findall(r'@allowed_tool\([^)]*\)\s*\nasync def (\w+)', content))
     all_sets = (READONLY_TOOLS | DISABLED_READONLY_TOOLS
-                | ALLOWED_WRITE_TOOLS | DISABLED_WRITE_TOOLS)
+                | ALLOWED_WRITE_TOOLS | PER_USER_WRITE_TOOLS | DISABLED_WRITE_TOOLS)
 
     uncategorized = func_names - all_sets
     extra = all_sets - func_names
@@ -127,10 +129,12 @@ def test_disabled_tools_not_in_active():
 def test_set_sizes():
     """Report the size of each set for quick verification."""
     total = (len(READONLY_TOOLS) + len(DISABLED_READONLY_TOOLS)
-             + len(ALLOWED_WRITE_TOOLS) + len(DISABLED_WRITE_TOOLS))
+             + len(ALLOWED_WRITE_TOOLS) + len(PER_USER_WRITE_TOOLS)
+             + len(DISABLED_WRITE_TOOLS))
     print(f"INFO: READONLY_TOOLS={len(READONLY_TOOLS)}, "
           f"DISABLED_READONLY_TOOLS={len(DISABLED_READONLY_TOOLS)}, "
           f"ALLOWED_WRITE_TOOLS={len(ALLOWED_WRITE_TOOLS)}, "
+          f"PER_USER_WRITE_TOOLS={len(PER_USER_WRITE_TOOLS)}, "
           f"DISABLED_WRITE_TOOLS={len(DISABLED_WRITE_TOOLS)}, "
           f"Total={total}")
 

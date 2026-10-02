@@ -5,7 +5,7 @@ import logging
 import base64
 import json
 import urllib.parse
-from typing import Optional, Dict, Union, Any, List
+from typing import Optional, Dict, Union, Any, List, Literal
 import uvicorn
 from mcp import types
 from mcp.server.fastmcp import FastMCP
@@ -13,6 +13,7 @@ from enum import IntEnum, Enum
 from pydantic import BaseModel, Field
 
 from . import oauth
+from . import per_user
 
 
 from dotenv import load_dotenv 
@@ -31,6 +32,13 @@ mcp = FastMCP("freshservice_mcp_managed", host="0.0.0.0", port=MCP_PORT)
 # API CREDENTIALS
 FRESHSERVICE_DOMAIN = os.getenv("FRESHSERVICE_DOMAIN")
 FRESHSERVICE_APIKEY = os.getenv("FRESHSERVICE_APIKEY")
+
+# KEY MODE
+# "shared" (default): every call uses FRESHSERVICE_APIKEY.
+# "per-user": no shared key; each call uses the caller's own key, read from
+# Open WebUI with the login token it sends (tool server Auth: Session).
+# Read at import because it decides which tools register.
+KEY_MODE = (os.getenv("FRESHSERVICE_KEY_MODE") or per_user.MODE_SHARED).strip().lower()
 
 
 class TicketSource(IntEnum):
@@ -257,6 +265,14 @@ ALLOWED_WRITE_TOOLS = set()
 # Also update the Freshservice API key's RBAC role to permit the action.
 # Example: ALLOWED_WRITE_TOOLS = {"send_ticket_reply", "create_ticket_note"}
 
+# Write tools that register only in per-user mode, where each change is made
+# with the caller's own key and credited to them. Never active in shared mode,
+# so the shared deployment's tool list is unaffected.
+PER_USER_WRITE_TOOLS = {
+    # Ticket Tasks
+    "update_ticket_task_status",
+}
+
 DISABLED_WRITE_TOOLS = {
     # Tickets
     "create_ticket",
@@ -323,6 +339,8 @@ DISABLED_WRITE_TOOLS = {
 
 # Combined set used by the decorator
 _ACTIVE_TOOLS = READONLY_TOOLS | ALLOWED_WRITE_TOOLS
+if KEY_MODE == per_user.MODE_PER_USER:
+    _ACTIVE_TOOLS = _ACTIVE_TOOLS | PER_USER_WRITE_TOOLS
 
 
 def allowed_tool(**tool_kwargs):
@@ -1826,6 +1844,32 @@ async def view_ticket_task(ticket_id: int, task_id: int) -> Dict[str, Any]:
                 return {"error": f"Failed to fetch ticket task: {str(e)}", "details": e.response.json()}
             except Exception:
                 return {"error": f"Failed to fetch ticket task: {str(e)}"}
+        except Exception as e:
+            return {"error": f"An unexpected error occurred: {str(e)}"}
+
+#UPDATE TICKET TASK STATUS
+# Freshservice task status codes, confirmed against live task data.
+TICKET_TASK_STATUS = {"open": 1, "completed": 3}
+
+@allowed_tool()
+async def update_ticket_task_status(ticket_id: int, task_id: int, status: Literal["open", "completed"]) -> Dict[str, Any]:
+    """Set a ticket task's status to open or completed. Only call this when the user explicitly asks to change a task's status. Changes nothing else on the task."""
+    if status not in TICKET_TASK_STATUS:
+        return {"error": "status must be 'open' or 'completed'"}
+
+    url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}/tasks/{task_id}"
+    headers = get_auth_headers()
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.put(url, headers=headers, json={"status": TICKET_TASK_STATUS[status]})
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            try:
+                return {"error": f"Failed to update ticket task: {str(e)}", "details": e.response.json()}
+            except Exception:
+                return {"error": f"Failed to update ticket task: {str(e)}"}
         except Exception as e:
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
@@ -3447,8 +3491,16 @@ async def publish_solution_article(article_id: int) -> Dict[str, Any]:
 
 # GET AUTH HEADERS
 def get_auth_headers():
+    if KEY_MODE == per_user.MODE_PER_USER:
+        # Only ever the caller's own key. There is deliberately no fallback to
+        # a shared key: a request without one must fail, not borrow access.
+        api_key = per_user.current_api_key()
+        if not api_key:
+            raise RuntimeError("no Freshservice API key for this request")
+    else:
+        api_key = FRESHSERVICE_APIKEY
     return {
-        "Authorization": f"Basic {base64.b64encode(f'{FRESHSERVICE_APIKEY}:X'.encode()).decode()}",
+        "Authorization": per_user.basic_auth_value(api_key),
         "Content-Type": "application/json"
     }
 
@@ -3556,8 +3608,59 @@ def _log_startup_posture(config: "oauth.OAuthConfig") -> None:
         )
 
 
+def build_per_user_app(owui_url: str):
+    """The MCP app for per-user mode: every tool call runs with the caller's own key."""
+    per_user.install_key_resolution(mcp, owui_url)
+    app = mcp.streamable_http_app()
+    app.router.routes.insert(0, per_user.healthz_route(lambda: len(mcp._tool_manager.list_tools())))
+    return app
+
+
+def main_per_user():
+    """Serve MCP for Open WebUI (Auth: Session); each call uses the caller's own key."""
+    owui_url = (os.getenv("OWUI_URL") or "").strip()
+    problems = []
+    if FRESHSERVICE_APIKEY:
+        # A shared key in this mode is exactly what the mode exists to avoid,
+        # and it would invite a fallback. Refuse rather than ignore it.
+        problems.append(
+            "FRESHSERVICE_APIKEY is set, but per-user mode must not hold a shared "
+            "key. Remove it from this container."
+        )
+    if not FRESHSERVICE_DOMAIN:
+        problems.append("FRESHSERVICE_DOMAIN is required (e.g. yourcompany.freshservice.com).")
+    if not owui_url.startswith(("http://", "https://")):
+        problems.append("OWUI_URL is required: Open WebUI's address on the Docker network (e.g. http://open-webui:8080).")
+    if problems:
+        for problem in problems:
+            logging.error("CONFIG_ERROR %s", problem)
+        raise SystemExit(1)
+
+    app = build_per_user_app(owui_url)
+    tool_names = sorted(t.name for t in mcp._tool_manager.list_tools())
+    logging.info(
+        "PER_USER_MODE domain=%s owui=%s tools=%d write_tools=%s",
+        FRESHSERVICE_DOMAIN,
+        owui_url,
+        len(tool_names),
+        sorted(set(tool_names) - READ_TOOLS) or "<none>",
+    )
+    uvicorn.run(app, host="0.0.0.0", port=MCP_PORT, log_level="info")
+
+
 def main():
     """Run the MCP server over streamable HTTP as an OAuth protected resource."""
+    if KEY_MODE == per_user.MODE_PER_USER:
+        main_per_user()
+        return
+    if KEY_MODE not in per_user.MODES:
+        logging.error(
+            "CONFIG_ERROR FRESHSERVICE_KEY_MODE=%r is not one of %s",
+            KEY_MODE,
+            ", ".join(per_user.MODES),
+        )
+        raise SystemExit(1)
+
     config = oauth.OAuthConfig.from_env()
 
     problems = config.validate()
@@ -3604,6 +3707,9 @@ def main():
 
 def main_stdio():
     """Run over stdio for local use. No network exposure, so no gate."""
+    if KEY_MODE != per_user.MODE_SHARED:
+        logging.error("CONFIG_ERROR stdio uses the shared key; unset FRESHSERVICE_KEY_MODE")
+        raise SystemExit(1)
     _install_tool_gating()
     logging.info("Starting Freshservice Managed MCP server on stdio")
     mcp.run(transport="stdio")
