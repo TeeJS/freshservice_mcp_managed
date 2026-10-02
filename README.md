@@ -169,8 +169,8 @@ no published port.
 3. The server calls Freshservice with that key.
 
 Keys are remembered for 5 minutes in memory, under a SHA-256 hash of the login
-token. Neither keys nor tokens are logged or written to disk. A missing or
-malformed key never reaches Freshservice.
+token. Neither keys nor tokens are logged or written to disk. A missing key
+never reaches Freshservice; whether a key is valid is left to Freshservice.
 
 **Setup**
 

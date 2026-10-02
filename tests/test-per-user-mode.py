@@ -25,7 +25,10 @@ import httpx
 OWUI_URL = "http://owui.test"
 KEY_A = "A" * 20
 KEY_B = "B" * 20
-KEY_REJECTED = "W" * 20  # well-formed, but Freshservice refuses it
+KEY_REJECTED = "W" * 20  # Freshservice refuses it
+# Freshservice doesn't document its key format, so a key with other
+# characters must still be passed through for Freshservice to judge.
+KEY_UNUSUAL = "Ab-cd_ef.gh+ij/kl=mn~op"
 
 # What the fake Open WebUI returns for each login token.
 OWUI_VALVES = {
@@ -34,7 +37,7 @@ OWUI_VALVES = {
     "tok-rejected": {"freshservice_api_key": KEY_REJECTED},
     "tok-empty": {},
     "tok-blank": {"freshservice_api_key": ""},
-    "tok-malformed": {"freshservice_api_key": "not a key!"},
+    "tok-unusual": {"freshservice_api_key": KEY_UNUSUAL},
 }
 TOKENS = list(OWUI_VALVES) + ["tok-noaccess", "tok-tool-missing"]
 
@@ -225,8 +228,12 @@ async def mcp_tests(results):
                 await refused("tok-empty", "Controls > Valves > Tools > Freshservice Key")
                 await refused("tok-blank", "Controls > Valves > Tools > Freshservice Key")
 
-            async def malformed_key_never_reaches_freshservice():
-                await refused("tok-malformed", "doesn't look right")
+            async def unusual_key_is_left_for_freshservice_to_judge():
+                mark = len(outbound)
+                await call_tool(client, "tok-unusual", "get_ticket_tasks", {"ticket_id": 1})
+                fs = since(mark, FS)
+                assert fs, "a key with unusual characters was refused locally"
+                assert all(o["auth"] == basic(KEY_UNUSUAL) for o in fs), fs
 
             async def no_access_or_expired_login_is_refused():
                 await refused("tok-noaccess", "wouldn't share")
@@ -287,7 +294,7 @@ async def mcp_tests(results):
                 key_is_cached_not_fetched_every_call,
                 no_login_token_is_refused,
                 missing_key_says_where_to_add_it,
-                malformed_key_never_reaches_freshservice,
+                unusual_key_is_left_for_freshservice_to_judge,
                 no_access_or_expired_login_is_refused,
                 missing_key_tool_is_reported,
                 empty_key_is_not_cached,
@@ -315,8 +322,8 @@ def test_no_fallback_to_a_shared_key():
 
 
 def test_logs_never_contain_a_key_or_token():
-    secrets = [KEY_A, KEY_B, KEY_REJECTED] + [t for t in TOKENS]
-    secrets += [basic(k).split(" ", 1)[1] for k in (KEY_A, KEY_B, KEY_REJECTED)]
+    secrets = [KEY_A, KEY_B, KEY_REJECTED, KEY_UNUSUAL] + [t for t in TOKENS]
+    secrets += [basic(k).split(" ", 1)[1] for k in (KEY_A, KEY_B, KEY_REJECTED, KEY_UNUSUAL)]
     leaked = [line for line in log_lines for s in secrets if s in line]
     assert not leaked, leaked[:3]
 

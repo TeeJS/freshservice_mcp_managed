@@ -21,7 +21,6 @@ import base64
 import contextvars
 import hashlib
 import logging
-import re
 import time
 from typing import Any
 
@@ -44,11 +43,6 @@ KEY_FIELD = "freshservice_api_key"
 
 # Where users save their key, as shown in every "add your key" message.
 WHERE_TO_SAVE = "in a chat, open Controls > Valves > Tools > Freshservice Key"
-
-# Freshservice API keys are short alphanumeric tokens. Anything else is
-# refused here, without a Freshservice call: invalid requests count against the
-# account-wide rate limit that every other integration shares.
-_KEY_PATTERN = re.compile(r"[A-Za-z0-9]{16,64}")
 
 # How long a user's key is reused before Open WebUI is asked again.
 KEY_CACHE_TTL_SECONDS = 300
@@ -160,15 +154,11 @@ class KeyLookup:
             valves = {}
         api_key = str(valves.get(KEY_FIELD) or "").strip() if isinstance(valves, dict) else ""
 
+        # Only an empty key is refused here. Freshservice doesn't document its
+        # key format, so whether a key is valid is left to Freshservice.
         if not api_key:
             log.info("KEY_LOOKUP result=not_set")
             raise KeyNotAvailable(f"Add your Freshservice API key first: {WHERE_TO_SAVE}.")
-        if not _KEY_PATTERN.fullmatch(api_key):
-            log.info("KEY_LOOKUP result=malformed")
-            raise KeyNotAvailable(
-                "Your saved Freshservice key doesn't look right. Copy it again from "
-                f"Freshservice > Profile Settings > Your API Key and save it: {WHERE_TO_SAVE}."
-            )
 
         self._remember(digest, api_key)
         log.info("KEY_LOOKUP result=found")
