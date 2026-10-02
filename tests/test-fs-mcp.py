@@ -4,6 +4,7 @@ from freshservice_mcp.server import (
     READONLY_TOOLS,
     ALLOWED_WRITE_TOOLS,
     DISABLED_WRITE_TOOLS,
+    PER_USER_WRITE_TOOLS,
     _ACTIVE_TOOLS,
     mcp,
     # Read-only tools for integration testing
@@ -67,6 +68,7 @@ def test_sets_do_not_overlap():
     ro_and_aw = READONLY_TOOLS & ALLOWED_WRITE_TOOLS
     ro_and_dw = READONLY_TOOLS & DISABLED_WRITE_TOOLS
     aw_and_dw = ALLOWED_WRITE_TOOLS & DISABLED_WRITE_TOOLS
+    pu_and_others = PER_USER_WRITE_TOOLS & (READONLY_TOOLS | ALLOWED_WRITE_TOOLS | DISABLED_WRITE_TOOLS)
 
     errors = []
     if ro_and_aw:
@@ -75,6 +77,8 @@ def test_sets_do_not_overlap():
         errors.append(f"READONLY_TOOLS & DISABLED_WRITE_TOOLS overlap: {ro_and_dw}")
     if aw_and_dw:
         errors.append(f"ALLOWED_WRITE_TOOLS & DISABLED_WRITE_TOOLS overlap: {aw_and_dw}")
+    if pu_and_others:
+        errors.append(f"PER_USER_WRITE_TOOLS overlaps another set: {pu_and_others}")
 
     if errors:
         print("FAIL: " + "; ".join(errors))
@@ -87,7 +91,7 @@ def test_all_decorated_functions_are_categorized():
         content = f.read()
 
     func_names = set(re.findall(r'@allowed_tool\(\)\s*\nasync def (\w+)', content))
-    all_sets = READONLY_TOOLS | ALLOWED_WRITE_TOOLS | DISABLED_WRITE_TOOLS
+    all_sets = READONLY_TOOLS | ALLOWED_WRITE_TOOLS | DISABLED_WRITE_TOOLS | PER_USER_WRITE_TOOLS
 
     uncategorized = func_names - all_sets
     extra = all_sets - func_names

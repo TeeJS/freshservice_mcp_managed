@@ -48,10 +48,14 @@ docker run -d \
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `FRESHSERVICE_APIKEY` | Yes | -- | Your Freshservice API key |
+| `FRESHSERVICE_APIKEY` | Yes\*\* | -- | Your Freshservice API key |
 | `FRESHSERVICE_DOMAIN` | Yes | -- | Your Freshservice domain (e.g., `yourcompany.freshservice.com`) |
+| `FRESHSERVICE_KEY_MODE` | No | `shared` | `shared` uses `FRESHSERVICE_APIKEY` for every call. `per-user` serves OpenAPI for Open WebUI, with each caller's own key — see [Per-User Key Mode](#per-user-key-mode-open-webui) |
 | `MCP_PORT` | No | `8080` | Port the MCP server listens on inside the container |
 | `MCP_PATH` | No | `/mcp` | Path the MCP endpoint is served on |
+
+\*\* Required in `shared` mode. In `per-user` mode it **must not** be set, and
+the server refuses to start if it is.
 
 #### Authentication
 
@@ -144,6 +148,43 @@ mcp_servers:
     transport: streamable-http
     url: http://<your-host-ip>:8080/mcp
 ```
+
+## Per-User Key Mode (Open WebUI)
+
+With `FRESHSERVICE_KEY_MODE=per-user` the server holds **no** Freshservice key.
+Each Open WebUI user adds it under **Settings → Integrations → External Tool
+Servers** and types **their own** Freshservice API key into the Bearer field.
+Every call runs with that key, so Freshservice applies that user's own
+permissions and credits any change to them.
+
+Open WebUI only lets users add **OpenAPI** tool servers, and calls them from the
+user's browser, so this mode serves OpenAPI instead of MCP:
+
+| Path | Key needed | Purpose |
+|------|------------|---------|
+| `GET /healthz` | No | Container healthcheck |
+| `GET /openapi.json` | Yes | Tool list |
+| `POST /<tool name>` | Yes | Run one tool; JSON body = arguments |
+
+It registers the read tools plus one write tool, `update_ticket_task_status`
+(sets a ticket task to `open` or `completed`, nothing else). That tool is
+**never** registered in `shared` mode.
+
+Before any key is used:
+
+- A missing or malformed key gets `401` without a Freshservice call.
+- A new key is checked once with Freshservice, and the result is cached for 10
+  minutes by its SHA-256 hash only. A wrong key is refused locally after that
+  first check. New-key checks are capped at 30 a minute, because invalid
+  requests count against the account-wide Freshservice rate limit.
+- Keys are never logged or stored on disk.
+
+Serve it from the **same site** as Open WebUI (e.g. a path on the Open WebUI
+hostname behind your reverse proxy). The browser makes the calls, and the
+server sends no CORS headers.
+
+Users who haven't set a key get a `401` that tells them where to add it. There
+is no fallback to a shared key.
 
 ## How the Allowlist Works
 
