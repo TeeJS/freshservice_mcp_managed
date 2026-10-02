@@ -1,7 +1,9 @@
 import asyncio
+import itertools
 import re
 from freshservice_mcp.server import (
     READONLY_TOOLS,
+    DISABLED_READONLY_TOOLS,
     ALLOWED_WRITE_TOOLS,
     DISABLED_WRITE_TOOLS,
     PER_USER_WRITE_TOOLS,
@@ -65,20 +67,19 @@ from freshservice_mcp.server import (
 
 def test_sets_do_not_overlap():
     """Verify no tool appears in more than one set."""
-    ro_and_aw = READONLY_TOOLS & ALLOWED_WRITE_TOOLS
-    ro_and_dw = READONLY_TOOLS & DISABLED_WRITE_TOOLS
-    aw_and_dw = ALLOWED_WRITE_TOOLS & DISABLED_WRITE_TOOLS
-    pu_and_others = PER_USER_WRITE_TOOLS & (READONLY_TOOLS | ALLOWED_WRITE_TOOLS | DISABLED_WRITE_TOOLS)
+    named_sets = {
+        "READONLY_TOOLS": READONLY_TOOLS,
+        "DISABLED_READONLY_TOOLS": DISABLED_READONLY_TOOLS,
+        "ALLOWED_WRITE_TOOLS": ALLOWED_WRITE_TOOLS,
+        "PER_USER_WRITE_TOOLS": PER_USER_WRITE_TOOLS,
+        "DISABLED_WRITE_TOOLS": DISABLED_WRITE_TOOLS,
+    }
 
     errors = []
-    if ro_and_aw:
-        errors.append(f"READONLY_TOOLS & ALLOWED_WRITE_TOOLS overlap: {ro_and_aw}")
-    if ro_and_dw:
-        errors.append(f"READONLY_TOOLS & DISABLED_WRITE_TOOLS overlap: {ro_and_dw}")
-    if aw_and_dw:
-        errors.append(f"ALLOWED_WRITE_TOOLS & DISABLED_WRITE_TOOLS overlap: {aw_and_dw}")
-    if pu_and_others:
-        errors.append(f"PER_USER_WRITE_TOOLS overlaps another set: {pu_and_others}")
+    for (name_a, set_a), (name_b, set_b) in itertools.combinations(named_sets.items(), 2):
+        overlap = set_a & set_b
+        if overlap:
+            errors.append(f"{name_a} & {name_b} overlap: {overlap}")
 
     if errors:
         print("FAIL: " + "; ".join(errors))
@@ -90,8 +91,9 @@ def test_all_decorated_functions_are_categorized():
     with open("src/freshservice_mcp/server.py", "r") as f:
         content = f.read()
 
-    func_names = set(re.findall(r'@allowed_tool\(\)\s*\nasync def (\w+)', content))
-    all_sets = READONLY_TOOLS | ALLOWED_WRITE_TOOLS | DISABLED_WRITE_TOOLS | PER_USER_WRITE_TOOLS
+    func_names = set(re.findall(r'@allowed_tool\([^)]*\)\s*\nasync def (\w+)', content))
+    all_sets = (READONLY_TOOLS | DISABLED_READONLY_TOOLS
+                | ALLOWED_WRITE_TOOLS | PER_USER_WRITE_TOOLS | DISABLED_WRITE_TOOLS)
 
     uncategorized = func_names - all_sets
     extra = all_sets - func_names
@@ -117,18 +119,22 @@ def test_active_tools_equals_readonly_plus_allowed():
         print(f"FAIL: _ACTIVE_TOOLS mismatch, diff: {diff}")
 
 def test_disabled_tools_not_in_active():
-    """Verify no disabled write tool is in the active set."""
-    leaked = DISABLED_WRITE_TOOLS & _ACTIVE_TOOLS
+    """Verify no disabled read or write tool is in the active set."""
+    leaked = (DISABLED_READONLY_TOOLS | DISABLED_WRITE_TOOLS) & _ACTIVE_TOOLS
     if leaked:
         print(f"FAIL: Disabled tools found in _ACTIVE_TOOLS: {leaked}")
     else:
-        print("PASS: No disabled write tools are active")
+        print("PASS: No disabled read or write tools are active")
 
 def test_set_sizes():
     """Report the size of each set for quick verification."""
-    total = len(READONLY_TOOLS) + len(ALLOWED_WRITE_TOOLS) + len(DISABLED_WRITE_TOOLS)
+    total = (len(READONLY_TOOLS) + len(DISABLED_READONLY_TOOLS)
+             + len(ALLOWED_WRITE_TOOLS) + len(PER_USER_WRITE_TOOLS)
+             + len(DISABLED_WRITE_TOOLS))
     print(f"INFO: READONLY_TOOLS={len(READONLY_TOOLS)}, "
+          f"DISABLED_READONLY_TOOLS={len(DISABLED_READONLY_TOOLS)}, "
           f"ALLOWED_WRITE_TOOLS={len(ALLOWED_WRITE_TOOLS)}, "
+          f"PER_USER_WRITE_TOOLS={len(PER_USER_WRITE_TOOLS)}, "
           f"DISABLED_WRITE_TOOLS={len(DISABLED_WRITE_TOOLS)}, "
           f"Total={total}")
 
