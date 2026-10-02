@@ -1,7 +1,9 @@
 import asyncio
+import itertools
 import re
 from freshservice_mcp.server import (
     READONLY_TOOLS,
+    DISABLED_READONLY_TOOLS,
     ALLOWED_WRITE_TOOLS,
     DISABLED_WRITE_TOOLS,
     _ACTIVE_TOOLS,
@@ -64,17 +66,18 @@ from freshservice_mcp.server import (
 
 def test_sets_do_not_overlap():
     """Verify no tool appears in more than one set."""
-    ro_and_aw = READONLY_TOOLS & ALLOWED_WRITE_TOOLS
-    ro_and_dw = READONLY_TOOLS & DISABLED_WRITE_TOOLS
-    aw_and_dw = ALLOWED_WRITE_TOOLS & DISABLED_WRITE_TOOLS
+    named_sets = {
+        "READONLY_TOOLS": READONLY_TOOLS,
+        "DISABLED_READONLY_TOOLS": DISABLED_READONLY_TOOLS,
+        "ALLOWED_WRITE_TOOLS": ALLOWED_WRITE_TOOLS,
+        "DISABLED_WRITE_TOOLS": DISABLED_WRITE_TOOLS,
+    }
 
     errors = []
-    if ro_and_aw:
-        errors.append(f"READONLY_TOOLS & ALLOWED_WRITE_TOOLS overlap: {ro_and_aw}")
-    if ro_and_dw:
-        errors.append(f"READONLY_TOOLS & DISABLED_WRITE_TOOLS overlap: {ro_and_dw}")
-    if aw_and_dw:
-        errors.append(f"ALLOWED_WRITE_TOOLS & DISABLED_WRITE_TOOLS overlap: {aw_and_dw}")
+    for (name_a, set_a), (name_b, set_b) in itertools.combinations(named_sets.items(), 2):
+        overlap = set_a & set_b
+        if overlap:
+            errors.append(f"{name_a} & {name_b} overlap: {overlap}")
 
     if errors:
         print("FAIL: " + "; ".join(errors))
@@ -86,8 +89,9 @@ def test_all_decorated_functions_are_categorized():
     with open("src/freshservice_mcp/server.py", "r") as f:
         content = f.read()
 
-    func_names = set(re.findall(r'@allowed_tool\(\)\s*\nasync def (\w+)', content))
-    all_sets = READONLY_TOOLS | ALLOWED_WRITE_TOOLS | DISABLED_WRITE_TOOLS
+    func_names = set(re.findall(r'@allowed_tool\([^)]*\)\s*\nasync def (\w+)', content))
+    all_sets = (READONLY_TOOLS | DISABLED_READONLY_TOOLS
+                | ALLOWED_WRITE_TOOLS | DISABLED_WRITE_TOOLS)
 
     uncategorized = func_names - all_sets
     extra = all_sets - func_names
