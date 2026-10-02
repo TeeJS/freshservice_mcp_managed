@@ -34,9 +34,9 @@ FRESHSERVICE_DOMAIN = os.getenv("FRESHSERVICE_DOMAIN")
 FRESHSERVICE_APIKEY = os.getenv("FRESHSERVICE_APIKEY")
 
 # KEY MODE
-# "shared" (default): every call uses FRESHSERVICE_APIKEY, served over MCP.
-# "per-user": no shared key; each request brings the caller's own key and the
-# tools are served over OpenAPI for Open WebUI user connections.
+# "shared" (default): every call uses FRESHSERVICE_APIKEY.
+# "per-user": no shared key; each call uses the caller's own key, read from
+# Open WebUI with the login token it sends (tool server Auth: Session).
 # Read at import because it decides which tools register.
 KEY_MODE = (os.getenv("FRESHSERVICE_KEY_MODE") or per_user.MODE_SHARED).strip().lower()
 
@@ -3608,8 +3608,17 @@ def _log_startup_posture(config: "oauth.OAuthConfig") -> None:
         )
 
 
+def build_per_user_app(owui_url: str):
+    """The MCP app for per-user mode: every tool call runs with the caller's own key."""
+    per_user.install_key_resolution(mcp, owui_url)
+    app = mcp.streamable_http_app()
+    app.router.routes.insert(0, per_user.healthz_route(lambda: len(mcp._tool_manager.list_tools())))
+    return app
+
+
 def main_per_user():
-    """Serve the tools over OpenAPI, each request running with the caller's own key."""
+    """Serve MCP for Open WebUI (Auth: Session); each call uses the caller's own key."""
+    owui_url = (os.getenv("OWUI_URL") or "").strip()
     problems = []
     if FRESHSERVICE_APIKEY:
         # A shared key in this mode is exactly what the mode exists to avoid,
@@ -3620,19 +3629,22 @@ def main_per_user():
         )
     if not FRESHSERVICE_DOMAIN:
         problems.append("FRESHSERVICE_DOMAIN is required (e.g. yourcompany.freshservice.com).")
+    if not owui_url.startswith(("http://", "https://")):
+        problems.append("OWUI_URL is required: Open WebUI's address on the Docker network (e.g. http://open-webui:8080).")
     if problems:
         for problem in problems:
             logging.error("CONFIG_ERROR %s", problem)
         raise SystemExit(1)
 
+    app = build_per_user_app(owui_url)
     tool_names = sorted(t.name for t in mcp._tool_manager.list_tools())
     logging.info(
-        "PER_USER_MODE domain=%s tools=%d write_tools=%s",
+        "PER_USER_MODE domain=%s owui=%s tools=%d write_tools=%s",
         FRESHSERVICE_DOMAIN,
+        owui_url,
         len(tool_names),
         sorted(set(tool_names) - READ_TOOLS) or "<none>",
     )
-    app = per_user.build_app(mcp, FRESHSERVICE_DOMAIN)
     uvicorn.run(app, host="0.0.0.0", port=MCP_PORT, log_level="info")
 
 

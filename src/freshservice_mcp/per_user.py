@@ -1,16 +1,18 @@
-"""Per-user key mode: an OpenAPI tool server for Open WebUI user connections.
+"""Per-user key mode: each Open WebUI user's calls run with their own Freshservice key.
 
-In this mode the server holds no Freshservice credential. Each request carries
-the caller's own Freshservice API key as ``Authorization: Bearer <key>`` (the
-key the user typed into Open WebUI's Settings > Integrations), and every
-Freshservice call made while serving that request uses that key and no other.
+In this mode the server holds no Freshservice credential. It is added in Open
+WebUI as an MCP tool server with Auth set to "Session", so every request
+carries the calling user's own Open WebUI login token. Before a tool runs, the
+server uses that token to ask Open WebUI for the user's Freshservice key, which
+the user saved in the user settings ("valves") of the Freshservice Key tool:
+
+    GET {OWUI_URL}/api/v1/tools/id/freshservice_key/valves/user
+
+Open WebUI answers with that user's own settings only. Every Freshservice call
+made for the request then uses that key and no other.
 
     open:   /healthz
-    keyed:  /openapi.json      -> tool list, built from the registered tools
-            POST /<tool name>  -> run one tool with the JSON body as arguments
-
-Open WebUI's user-level tool servers are OpenAPI-only and are called from the
-user's browser, so this is an OpenAPI surface rather than MCP.
+    MCP:    /mcp       (tools/call needs a login token and a saved key)
 """
 
 from __future__ import annotations
@@ -18,15 +20,13 @@ from __future__ import annotations
 import base64
 import contextvars
 import hashlib
-import json
 import logging
 import re
 import time
 from typing import Any
 
 import httpx
-from pydantic import ValidationError
-from starlette.applications import Starlette
+from mcp import types
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -37,29 +37,33 @@ MODE_SHARED = "shared"
 MODE_PER_USER = "per-user"
 MODES = (MODE_SHARED, MODE_PER_USER)
 
+# The Open WebUI tool that holds each user's key, and the field within it.
+# Must match owui/freshservice_key.py.
+KEY_TOOL_ID = "freshservice_key"
+KEY_FIELD = "freshservice_api_key"
+
+# Where users save their key, as shown in every "add your key" message.
+WHERE_TO_SAVE = "in a chat, open Controls > Valves > Tools > Freshservice Key"
+
 # Freshservice API keys are short alphanumeric tokens. Anything else is
 # refused here, without a Freshservice call: invalid requests count against the
 # account-wide rate limit that every other integration shares.
 _KEY_PATTERN = re.compile(r"[A-Za-z0-9]{16,64}")
 
-# How long a key's check result is reused before Freshservice is asked again.
-KEY_CHECK_TTL_SECONDS = 600
-# Upper bound on remembered check results, so a stream of junk keys cannot grow
-# memory without limit.
-KEY_CHECK_CACHE_MAX = 1000
-# Freshservice checks allowed per minute across all callers. A burst of new
-# keys beyond this is refused instead of being passed on to Freshservice.
-KEY_CHECKS_PER_MINUTE = 30
+# How long a user's key is reused before Open WebUI is asked again.
+KEY_CACHE_TTL_SECONDS = 300
+# Upper bound on remembered keys.
+KEY_CACHE_MAX = 1000
 
-# The key for the request being served. Set by the request handler, read by
-# get_auth_headers(); a contextvar keeps concurrent requests apart.
+# The key for the call being served. Set before a tool runs, read by
+# get_auth_headers(); a contextvar keeps concurrent calls apart.
 _request_api_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "freshservice_request_api_key", default=None
 )
 
 
 def current_api_key() -> str | None:
-    """The Freshservice API key sent with the request being served, if any."""
+    """The Freshservice API key for the call being served, if any."""
     return _request_api_key.get()
 
 
@@ -68,218 +72,149 @@ def basic_auth_value(api_key: str) -> str:
     return "Basic " + base64.b64encode(f"{api_key}:X".encode()).decode()
 
 
-def _key_hash(api_key: str) -> str:
-    return hashlib.sha256(api_key.encode()).hexdigest()
+class KeyNotAvailable(Exception):
+    """The user's key could not be obtained. The message is shown to the user."""
 
 
-def _bearer_key(request: Request) -> str | None:
+def _bearer_token(request: Request | None) -> str | None:
+    if request is None:
+        return None
     header = request.headers.get("authorization", "")
     scheme, _, value = header.partition(" ")
     if scheme.lower() != "bearer":
         return None
-    value = value.strip()
-    return value or None
+    return value.strip() or None
 
 
-def _error(status: int, message: str) -> JSONResponse:
-    return JSONResponse({"detail": message}, status_code=status)
+class KeyLookup:
+    """Fetch a user's Freshservice key from Open WebUI with their login token.
 
-
-class KeyChecker:
-    """Confirm a key with Freshservice once, then answer from memory.
-
-    Only a SHA-256 hash of each key is kept, never the key itself.
+    Found keys are remembered for a few minutes, in memory only, under a
+    SHA-256 hash of the login token. Neither the token nor the key is logged.
     """
 
-    def __init__(self, domain: str) -> None:
-        self.domain = domain
-        self._results: dict[str, tuple[bool, float]] = {}
-        self._recent_checks: list[float] = []
+    def __init__(self, owui_url: str) -> None:
+        self.url = f"{owui_url.rstrip('/')}/api/v1/tools/id/{KEY_TOOL_ID}/valves/user"
+        self._cache: dict[str, tuple[str, float]] = {}
 
-    def _cached(self, digest: str) -> bool | None:
-        entry = self._results.get(digest)
+    def _cached(self, digest: str) -> str | None:
+        entry = self._cache.get(digest)
         if entry is None:
             return None
-        valid, expires = entry
+        api_key, expires = entry
         if expires < time.monotonic():
-            del self._results[digest]
+            del self._cache[digest]
             return None
-        return valid
+        return api_key
 
-    def _remember(self, digest: str, valid: bool) -> None:
+    def _remember(self, digest: str, api_key: str) -> None:
         now = time.monotonic()
-        if len(self._results) >= KEY_CHECK_CACHE_MAX:
-            self._results = {
-                d: entry for d, entry in self._results.items() if entry[1] >= now
-            }
-            if len(self._results) >= KEY_CHECK_CACHE_MAX:
-                self._results.pop(next(iter(self._results)))
-        self._results[digest] = (valid, now + KEY_CHECK_TTL_SECONDS)
+        if len(self._cache) >= KEY_CACHE_MAX:
+            self._cache = {d: e for d, e in self._cache.items() if e[1] >= now}
+            if len(self._cache) >= KEY_CACHE_MAX:
+                self._cache.pop(next(iter(self._cache)))
+        self._cache[digest] = (api_key, now + KEY_CACHE_TTL_SECONDS)
 
-    def _take_check_slot(self) -> bool:
-        now = time.monotonic()
-        self._recent_checks = [t for t in self._recent_checks if now - t < 60]
-        if len(self._recent_checks) >= KEY_CHECKS_PER_MINUTE:
-            return False
-        self._recent_checks.append(now)
-        return True
-
-    async def check(self, api_key: str) -> JSONResponse | None:
-        """Return None if the key may be used, or the error response to send."""
-        if not _KEY_PATTERN.fullmatch(api_key):
-            return _error(
-                401,
-                "That doesn't look like a Freshservice API key. Copy it from "
-                "Freshservice > Profile Settings > Your API Key.",
+    async def key_for(self, token: str | None) -> str:
+        """The caller's Freshservice key, or KeyNotAvailable saying what to do."""
+        if not token:
+            log.warning("KEY_LOOKUP result=no_login_token")
+            raise KeyNotAvailable(
+                "Open WebUI didn't send a login token. In Open WebUI's admin settings, "
+                "this tool server's Auth must be set to Session."
             )
 
-        digest = _key_hash(api_key)
+        digest = hashlib.sha256(token.encode()).hexdigest()
         cached = self._cached(digest)
-        if cached is True:
-            return None
-        if cached is False:
-            return _error(401, "Freshservice rejected this API key.")
+        if cached is not None:
+            return cached
 
-        if not self._take_check_slot():
-            log.warning("KEY_CHECK_THROTTLED limit=%d/min", KEY_CHECKS_PER_MINUTE)
-            return _error(429, "Too many new keys to check right now. Try again in a minute.")
-
-        url = f"https://{self.domain}/api/v2/tickets"
-        headers = {"Authorization": basic_auth_value(api_key)}
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(url, headers=headers, params={"per_page": 1})
+                response = await client.get(
+                    self.url, headers={"Authorization": f"Bearer {token}"}, timeout=10
+                )
         except httpx.HTTPError as exc:
-            log.warning("KEY_CHECK_FAILED error=%s", type(exc).__name__)
-            return _error(503, "Couldn't reach Freshservice to check the key. Try again.")
+            log.warning("KEY_LOOKUP result=owui_unreachable error=%s", type(exc).__name__)
+            raise KeyNotAvailable("Couldn't reach Open WebUI to read your Freshservice key. Try again.")
 
-        if response.status_code == 401:
-            self._remember(digest, False)
-            log.info("KEY_REJECTED key=sha256:%s", digest[:12])
-            return _error(401, "Freshservice rejected this API key.")
-        if response.status_code in (200, 403):
-            # 403 still proves the key is genuine; what it may read is enforced
-            # by Freshservice on each call.
-            self._remember(digest, True)
-            log.info("KEY_ACCEPTED key=sha256:%s", digest[:12])
-            return None
-
-        log.warning("KEY_CHECK_UNEXPECTED status=%s", response.status_code)
-        return _error(503, "Couldn't check the key with Freshservice. Try again.")
-
-
-def build_openapi(tools: list[Any], title: str) -> dict[str, Any]:
-    """An OpenAPI document with one POST operation per registered tool."""
-    paths: dict[str, Any] = {}
-    for tool in tools:
-        schema = dict(tool.parameters)
-        schema.pop("title", None)
-        schema.setdefault("type", "object")
-        schema.setdefault("properties", {})
-        paths[f"/{tool.name}"] = {
-            "post": {
-                "operationId": tool.name,
-                "summary": tool.name.replace("_", " "),
-                "description": tool.description or tool.name,
-                "requestBody": {
-                    "required": bool(schema.get("required")),
-                    "content": {"application/json": {"schema": schema}},
-                },
-                "responses": {
-                    "200": {"description": "Tool result"},
-                    "401": {"description": "Missing or rejected Freshservice API key"},
-                    "422": {"description": "Invalid arguments"},
-                },
-            }
-        }
-    return {
-        "openapi": "3.1.0",
-        "info": {
-            "title": title,
-            "version": "1.0.0",
-            "description": "Freshservice tools that run with your own Freshservice API key.",
-        },
-        "paths": paths,
-        "components": {
-            "securitySchemes": {"freshserviceKey": {"type": "http", "scheme": "bearer"}}
-        },
-        "security": [{"freshserviceKey": []}],
-    }
-
-
-def build_app(mcp, domain: str) -> Starlette:
-    """The per-user ASGI app, serving exactly the tools registered on ``mcp``."""
-    checker = KeyChecker(domain)
-    tool_manager = mcp._tool_manager
-
-    def tools() -> list[Any]:
-        return tool_manager.list_tools()
-
-    async def healthz(request: Request) -> JSONResponse:
-        return JSONResponse({"status": "ok", "mode": MODE_PER_USER, "tools": len(tools())})
-
-    async def authorize(request: Request) -> tuple[str | None, JSONResponse | None]:
-        api_key = _bearer_key(request)
-        if api_key is None:
-            return None, _error(
-                401,
-                "Add your Freshservice API key as the Bearer key for this tool server "
-                "(OWUI Settings > Integrations).",
+        if response.status_code == 404:
+            log.warning("KEY_LOOKUP result=key_tool_missing")
+            raise KeyNotAvailable(
+                "The Freshservice Key tool isn't installed in Open WebUI "
+                "(Workspace > Tools, ID freshservice_key). Ask your Open WebUI admin."
             )
-        refusal = await checker.check(api_key)
-        if refusal is not None:
-            return None, refusal
-        return api_key, None
+        if response.status_code in (401, 403):
+            log.info("KEY_LOOKUP result=refused status=%s", response.status_code)
+            raise KeyNotAvailable(
+                "Open WebUI wouldn't share your Freshservice key. Your login may have "
+                "expired, or you don't have access to the Freshservice Key tool."
+            )
+        if response.status_code != 200:
+            log.warning("KEY_LOOKUP result=unexpected status=%s", response.status_code)
+            raise KeyNotAvailable("Couldn't read your Freshservice key from Open WebUI. Try again.")
 
-    async def openapi(request: Request) -> JSONResponse:
-        _, refusal = await authorize(request)
-        if refusal is not None:
-            return refusal
-        return JSONResponse(build_openapi(tools(), "Freshservice"))
+        try:
+            valves = response.json() or {}
+        except ValueError:
+            valves = {}
+        api_key = str(valves.get(KEY_FIELD) or "").strip() if isinstance(valves, dict) else ""
 
-    async def call(request: Request) -> JSONResponse:
-        name = request.path_params["tool"]
-        tool = tool_manager.get_tool(name)
-        if tool is None:
-            # Unregistered includes every disabled write tool.
-            return _error(404, f"No tool named {name!r}.")
+        if not api_key:
+            log.info("KEY_LOOKUP result=not_set")
+            raise KeyNotAvailable(f"Add your Freshservice API key first: {WHERE_TO_SAVE}.")
+        if not _KEY_PATTERN.fullmatch(api_key):
+            log.info("KEY_LOOKUP result=malformed")
+            raise KeyNotAvailable(
+                "Your saved Freshservice key doesn't look right. Copy it again from "
+                f"Freshservice > Profile Settings > Your API Key and save it: {WHERE_TO_SAVE}."
+            )
 
-        api_key, refusal = await authorize(request)
-        if refusal is not None:
-            return refusal
+        self._remember(digest, api_key)
+        log.info("KEY_LOOKUP result=found")
+        return api_key
 
-        raw = await request.body()
-        if raw.strip():
-            try:
-                arguments = json.loads(raw)
-            except ValueError:
-                return _error(422, "The request body must be a JSON object.")
-        else:
-            arguments = {}
-        if not isinstance(arguments, dict):
-            return _error(422, "The request body must be a JSON object.")
+
+def install_key_resolution(mcp, owui_url: str) -> None:
+    """Resolve the caller's key before every tool call; refuse the call without one.
+
+    Wraps the tools/call handler FastMCP already installed, the same way the
+    shared mode's tool gating does. The key is set for the duration of the call
+    only, so a tool can never run with a key that isn't the caller's.
+    """
+    lookup = KeyLookup(owui_url)
+    srv = mcp._mcp_server
+    original_call = srv.request_handlers[types.CallToolRequest]
+
+    async def call_with_user_key(req):
+        try:
+            request = srv.request_context.request
+        except LookupError:
+            request = None
+
+        try:
+            api_key = await lookup.key_for(_bearer_token(request))
+        except KeyNotAvailable as exc:
+            return types.ServerResult(
+                types.CallToolResult(
+                    content=[types.TextContent(type="text", text=str(exc))],
+                    isError=True,
+                )
+            )
 
         token = _request_api_key.set(api_key)
         try:
-            result = await tool.run(arguments)
-        except Exception as exc:
-            if isinstance(exc.__cause__, ValidationError):
-                problems = "; ".join(
-                    f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
-                    for err in exc.__cause__.errors(include_url=False, include_input=False)
-                )
-                return _error(422, f"Invalid arguments for {name}: {problems}")
-            log.warning("TOOL_FAILED tool=%s error=%s", name, type(exc).__name__)
-            return _error(500, f"{name} failed: {type(exc).__name__}")
+            return await original_call(req)
         finally:
             _request_api_key.reset(token)
 
-        return JSONResponse(result)
+    srv.request_handlers[types.CallToolRequest] = call_with_user_key
 
-    return Starlette(
-        routes=[
-            Route("/healthz", healthz, methods=["GET"]),
-            Route("/openapi.json", openapi, methods=["GET"]),
-            Route("/{tool}", call, methods=["POST"]),
-        ]
-    )
+
+def healthz_route(tool_count) -> Route:
+    """Container healthcheck. Needs no token and reveals nothing sensitive."""
+
+    async def healthz(request: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok", "mode": MODE_PER_USER, "tools": tool_count()})
+
+    return Route("/healthz", healthz, methods=["GET"])
