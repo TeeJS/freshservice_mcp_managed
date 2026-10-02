@@ -117,17 +117,19 @@ def test_active_tools_equals_readonly_plus_allowed():
         print(f"FAIL: _ACTIVE_TOOLS mismatch, diff: {diff}")
 
 def test_disabled_tools_not_in_active():
-    """Verify no disabled write tool is in the active set."""
-    leaked = DISABLED_WRITE_TOOLS & _ACTIVE_TOOLS
+    """Verify no disabled read or write tool is in the active set."""
+    leaked = (DISABLED_READONLY_TOOLS | DISABLED_WRITE_TOOLS) & _ACTIVE_TOOLS
     if leaked:
         print(f"FAIL: Disabled tools found in _ACTIVE_TOOLS: {leaked}")
     else:
-        print("PASS: No disabled write tools are active")
+        print("PASS: No disabled read or write tools are active")
 
 def test_set_sizes():
     """Report the size of each set for quick verification."""
-    total = len(READONLY_TOOLS) + len(ALLOWED_WRITE_TOOLS) + len(DISABLED_WRITE_TOOLS)
+    total = (len(READONLY_TOOLS) + len(DISABLED_READONLY_TOOLS)
+             + len(ALLOWED_WRITE_TOOLS) + len(DISABLED_WRITE_TOOLS))
     print(f"INFO: READONLY_TOOLS={len(READONLY_TOOLS)}, "
+          f"DISABLED_READONLY_TOOLS={len(DISABLED_READONLY_TOOLS)}, "
           f"ALLOWED_WRITE_TOOLS={len(ALLOWED_WRITE_TOOLS)}, "
           f"DISABLED_WRITE_TOOLS={len(DISABLED_WRITE_TOOLS)}, "
           f"Total={total}")
