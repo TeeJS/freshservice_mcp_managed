@@ -1,6 +1,6 @@
 # PROJECT CHARTER — Compact output for ticket searches
 
-**Status:** APPROVED 2026-10-02. Step 1 (code and tests) done on the branch, 48/48 tests pass; awaiting the OK for step 2.
+**Status:** VERIFIED 2026-10-02 on Rosie (image `sha-c01c313`, `FRESHSERVICE_OUTPUT: compact`): `/healthz` reports `"output":"compact"`; a 14-day search (532 tickets, 9 searches) stayed inside the context window; one ticket = 14,721 prompt tokens; a term preview ran unchanged. Merged to `main` 2026-10-02.
 **Created:** 2026-10-02
 **Branch:** `feat/compact-output` (never `main`)
 
