@@ -1,6 +1,6 @@
 # PROJECT CHARTER — Search tickets by text, on the server
 
-**Status:** APPROVED 2026-10-02. Step 1 (code, tests, README) done on the branch, 59/59 tests pass. **Added with your OK (2026-10-02):** `get_requested_items` enabled as a read tool (it was disabled; the OWUI filter-list entry needed it). Read tools 22 → 24.
+**Status:** MERGED 2026-10-03 at T.J.'s instruction ("merge as is"), default cap left at 20 pages. Verified on Rosie (image `sha-a1d4ab7`): healthz 27 tools; onboarding search found the portal request and the new hire's own email in 2 calls; a termination search with no ticket answered "none"; a term preview ran unchanged. Not yet re-run: the four-item Titan question (the model's login-ID → name step was being fixed in the prompt). **Added with your OK (2026-10-02):** `get_requested_items` enabled as a read tool (it was disabled; the OWUI filter-list entry needed it). Read tools 22 → 24.
 **Created:** 2026-10-02
 **Branch:** `feat/search-tickets` (never `main`)
 
