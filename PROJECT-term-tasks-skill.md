@@ -5,6 +5,8 @@
 **Revision 1 (approved 2026-10-02):** the term skill. Steps 1–5 done: tool `complete_term_tasks` (commit `3159a52`), Rosie on `sha-3159a52`, skill **Term Tasks** added and attached to ERP Admin. Preview test not yet run.
 **Revision 2 (2026-10-02):** adds ticket notes. A general "add a note to a ticket" tool (private by default, public only when asked), and the term tool writes its own private note on the ticket: just "No <system> account", one line per system without an account (T.J., 2026-10-02).
 
+**Progress (2026-10-02):** steps 1–4 done (commit `dad74cb`, Rosie on `sha-dad74cb`, ERP Admin prompt line added). Verification 1 ✅ preview on 47146 (employee 37: AD + SAP only) showed: TSK-5609 already completed; would complete TSK-5611 (Titan) and TSK-5610 (Qlik); would add the note "No Titan account; No Qlik account". Confirmed via Freshservice that nothing was changed or written. **Real runs (verification 2–4) are on hold until T.J. trains with a coworker.** **Step 6 done early, at T.J.'s instruction (2026-10-02):** the branch was rebased onto `main` and merged ahead of the real runs. The commits are now `6cf7bbf` (term tool) and `2878b79` (notes), the same code as `sha-dad74cb`. Rosie moved to `:latest` on 2026-10-02 (then `c52fb0c`, which also carries compact output; a term preview on 47146 ran unchanged under it).
+
 ---
 
 ## What you'll type, and what you'll get
