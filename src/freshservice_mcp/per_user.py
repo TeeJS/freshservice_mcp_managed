@@ -201,10 +201,10 @@ def install_key_resolution(mcp, owui_url: str) -> None:
     srv.request_handlers[types.CallToolRequest] = call_with_user_key
 
 
-def healthz_route(tool_count) -> Route:
+def healthz_route(tool_count, output_mode: str = "full") -> Route:
     """Container healthcheck. Needs no token and reveals nothing sensitive."""
 
     async def healthz(request: Request) -> JSONResponse:
-        return JSONResponse({"status": "ok", "mode": MODE_PER_USER, "tools": tool_count()})
+        return JSONResponse({"status": "ok", "mode": MODE_PER_USER, "tools": tool_count(), "output": output_mode})
 
     return Route("/healthz", healthz, methods=["GET"])

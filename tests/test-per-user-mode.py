@@ -86,7 +86,32 @@ TICKETS = {
     60005: term_ticket("Terminate Lee Moe 4242", term_template(7401)),
     60006: term_ticket("Printer jam", [], category="Hardware", sub_category="Printer"),
     60007: {**term_ticket("Printer jam again", [], category="Hardware", sub_category="Printer"), "forces_public": True},
+    60008: {**term_ticket("Laptop fan noise", [], category="Hardware", sub_category="Laptop"),
+            "description": "<div><b>Hello</b><br>fan noise</div>", "description_text": "Hello fan noise",
+            "custom_fields": {"lf_location": 1}, "attachments": []},
 }
+
+
+def list_ticket(i):
+    """A ticket as Freshservice returns it in a list: the HTML copy of the first message dwarfs the rest."""
+    text = f"Line one of ticket {i}.\n\n   Line   two, with   spaces.\r\n" * 40  # about 1,900 characters
+    return {
+        "id": 70000 + i, "type": "Incident" if i % 2 else "Service Request", "subject": f"Subject {i}",
+        "status": 2, "status_name": "Open", "priority": 1, "requester_id": 11, "responder_id": 22,
+        "group_id": 33, "workspace_id": 2, "category": "Hardware", "sub_category": "Monitor",
+        "item_category": None, "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+        "due_by": "2026-10-09T00:00:00Z", "fr_due_by": "2026-10-03T00:00:00Z", "is_escalated": False,
+        "description": '<div style="font-size: 11px">' + "<span>word</span> " * 1500 + "</div>",  # about 30 KB
+        "description_text": text,
+        "custom_fields": {"a": None, "b": "x", "lf_location": 123}, "attachments": [], "cc_emails": ["x@example.com"],
+    }
+
+
+LIST_PAGE = [list_ticket(i) for i in range(30)]
+CONVERSATIONS = {"conversations": [
+    {"id": 1, "body": "<div>Hi<br>there</div>", "body_text": "Hi there", "private": True, "user_id": 5, "attachments": []},
+    {"id": 2, "body": "<p>Fixed</p>", "body_text": "Fixed", "private": False, "user_id": 6, "attachments": []},
+], "meta": {"count": 2, "has_more": False}}
 
 
 async def fake_upstreams(request: httpx.Request) -> httpx.Response:
@@ -109,8 +134,15 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
     if host == "example.freshservice.com":
         if auth not in (basic(KEY_A), basic(KEY_B)):
             return httpx.Response(401, json={"message": "invalid credentials"})
+        if request.method == "GET" and request.url.path == "/api/v2/tickets/filter":
+            return httpx.Response(200, json={"tickets": LIST_PAGE, "total": len(LIST_PAGE)})
+        if request.method == "GET" and request.url.path == "/api/v2/tickets":
+            return httpx.Response(200, json=LIST_PAGE,
+                                  headers={"Link": '<https://example.freshservice.com/api/v2/tickets?page=2>; rel="next"'})
         parts = request.url.path.strip("/").split("/")  # api v2 tickets <id> [tasks [<task id>]]
         ticket = TICKETS.get(int(parts[3])) if len(parts) > 3 and parts[3].isdigit() else None
+        if request.method == "GET" and len(parts) == 5 and parts[4] == "conversations":
+            return httpx.Response(200, json=CONVERSATIONS)
         if request.method == "GET" and len(parts) == 4:
             if ticket is None:
                 return httpx.Response(404, json={"message": "not found"})
@@ -228,7 +260,7 @@ async def mcp_tests(results):
             async def healthz_needs_no_token():
                 r = await client.get("/healthz")
                 assert r.status_code == 200, r.text
-                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 25}, r.json()
+                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 25, "output": "full"}, r.json()
 
             async def tool_list_is_exactly_the_per_user_tools():
                 result = await mcp_request(client, None, "tools/list")
@@ -486,6 +518,92 @@ async def mcp_tests(results):
                 assert "must be a number" in r["error"], r
                 assert not since(mark, FS), "Freshservice was called for a bad employee ID"
 
+            # --- compact output -------------------------------------------------------
+
+            async def tool(name, **arguments):
+                is_error, text = await call_tool(client, "tok-a", name, arguments)
+                assert not is_error, text
+                return json.loads(text)
+
+            class compact:
+                """Switch the server to compact output for one test, then back."""
+                def __enter__(self):
+                    server.OUTPUT_MODE = server.OUTPUT_COMPACT
+                def __exit__(self, *exc):
+                    server.OUTPUT_MODE = server.OUTPUT_FULL
+
+            expected_keys = list(server.COMPACT_TICKET_FIELDS) + ["description_preview"]
+
+            async def full_output_is_unchanged_by_default():
+                assert server.OUTPUT_MODE == "full", server.OUTPUT_MODE
+                assert await tool("filter_tickets", query="status:2") == {"tickets": LIST_PAGE, "total": 30}
+                paged = await tool("get_tickets", page=1, per_page=30)
+                assert paged["tickets"] == LIST_PAGE and paged["pagination"]["next_page"] == 2, paged["pagination"]
+                single = await tool("get_ticket_by_id", ticket_id=60008)
+                assert single == {"ticket": {k: v for k, v in TICKETS[60008].items() if k != "tasks"}}, single
+                assert await tool("list_all_ticket_conversation", ticket_id=60008) == CONVERSATIONS
+
+            async def compact_list_records_have_only_the_listed_fields():
+                with compact():
+                    r = await tool("filter_tickets", query="status:2")
+                assert r["total"] == 30 and len(r["tickets"]) == 30, (r.get("total"), len(r.get("tickets", [])))
+                for record, source in zip(r["tickets"], LIST_PAGE):
+                    assert list(record.keys()) == expected_keys, list(record.keys())
+                    for field in server.COMPACT_TICKET_FIELDS:
+                        assert record[field] == source[field], field
+                    preview = record["description_preview"]
+                    assert len(preview) <= 500 and "\n" not in preview and "  " not in preview, repr(preview[:60])
+                    assert preview.startswith(f"Line one of ticket {source['id'] - 70000}. Line two, with spaces."), repr(preview[:60])
+                    assert "description" not in record and "custom_fields" not in record
+
+            async def compact_page_of_30_is_small():
+                with compact():
+                    small = await tool("filter_tickets", query="status:2")
+                big = await tool("filter_tickets", query="status:2")
+                assert len(json.dumps(small)) < 40_000, len(json.dumps(small))
+                assert len(json.dumps(big)) > 500_000, len(json.dumps(big))
+
+            async def compact_get_tickets_keeps_pagination():
+                with compact():
+                    r = await tool("get_tickets", page=1, per_page=30)
+                assert r["pagination"] == {"current_page": 1, "next_page": 2, "prev_page": None, "per_page": 30}, r["pagination"]
+                assert all(list(t.keys()) == expected_keys for t in r["tickets"]), [list(t.keys()) for t in r["tickets"][:1]]
+
+            async def fields_all_returns_full_records_in_compact_mode():
+                with compact():
+                    assert await tool("filter_tickets", query="status:2", fields="all") == {"tickets": LIST_PAGE, "total": 30}
+                    paged = await tool("get_tickets", page=1, per_page=30, fields="all")
+                    assert paged["tickets"] == LIST_PAGE
+
+            async def fields_other_than_all_is_refused_without_a_call():
+                for name, args in [("filter_tickets", {"query": "status:2"}), ("get_tickets", {"page": 1})]:
+                    mark = len(outbound)
+                    r = await tool(name, fields="summary", **args)
+                    assert r == {"error": "fields must be 'all' or left out."}, r
+                    assert not since(mark, FS), "Freshservice was called despite a bad fields value"
+
+            async def compact_single_ticket_drops_only_the_html():
+                with compact():
+                    r = await tool("get_ticket_by_id", ticket_id=60008)
+                full = {k: v for k, v in TICKETS[60008].items() if k != "tasks"}
+                assert r == {"ticket": {k: v for k, v in full.items() if k != "description"}}, r
+                assert r["ticket"]["description_text"] == "Hello fan noise" and r["ticket"]["custom_fields"] == {"lf_location": 1}
+
+            async def compact_conversations_drop_only_the_html_body():
+                with compact():
+                    r = await tool("list_all_ticket_conversation", ticket_id=60008)
+                expected = {**CONVERSATIONS, "conversations": [{k: v for k, v in c.items() if k != "body"} for c in CONVERSATIONS["conversations"]]}
+                assert r == expected, r
+                assert [c["body_text"] for c in r["conversations"]] == ["Hi there", "Fixed"]
+
+            async def compact_mode_leaves_the_term_tool_alone():
+                # A preview changes nothing, so the same call must answer the same in both modes.
+                _, in_full = await term(ticket_id=60001, employee_id="11116", systems_without_account=["Titan"], preview=True)
+                with compact():
+                    is_error, in_compact = await term(ticket_id=60001, employee_id="11116", systems_without_account=["Titan"], preview=True)
+                assert not is_error and in_compact == in_full and in_compact["preview"] is True, (in_full, in_compact)
+                assert any("No Titan account" in line for line in in_compact["lines"]), in_compact["lines"]
+
             for fn in [
                 healthz_needs_no_token,
                 tool_list_is_exactly_the_per_user_tools,
@@ -516,6 +634,15 @@ async def mcp_tests(results):
                 note_text_is_escaped_and_keeps_line_breaks,
                 note_refuses_empty_text_and_missing_tickets,
                 note_reports_what_freshservice_actually_saved,
+                full_output_is_unchanged_by_default,
+                compact_list_records_have_only_the_listed_fields,
+                compact_page_of_30_is_small,
+                compact_get_tickets_keeps_pagination,
+                fields_all_returns_full_records_in_compact_mode,
+                fields_other_than_all_is_refused_without_a_call,
+                compact_single_ticket_drops_only_the_html,
+                compact_conversations_drop_only_the_html_body,
+                compact_mode_leaves_the_term_tool_alone,
             ]:
                 await asyncio.wait_for(check(fn.__name__, fn()), timeout=60)
 
@@ -600,6 +727,22 @@ def test_unknown_mode_refuses_to_start():
     r = _python("from freshservice_mcp.server import main; main()", {"FRESHSERVICE_KEY_MODE": "peruser"})
     assert r.returncode == 1, (r.returncode, r.stderr[-500:])
     assert "is not one of" in r.stderr, r.stderr[-500:]
+
+
+def test_unknown_output_mode_refuses_to_start():
+    r = _python("from freshservice_mcp.server import main; main()", {"FRESHSERVICE_OUTPUT": "small", "OWUI_URL": OWUI_URL})
+    assert r.returncode == 1, (r.returncode, r.stderr[-500:])
+    assert "FRESHSERVICE_OUTPUT='small' is not one of full, compact" in r.stderr, r.stderr[-500:]
+
+
+def test_output_mode_is_full_unless_asked_for_in_either_key_mode():
+    code = "from freshservice_mcp.server import OUTPUT_MODE, KEY_MODE; print(KEY_MODE, OUTPUT_MODE)"
+    shared = _python(code, {"FRESHSERVICE_APIKEY": "S" * 20}, drop=("FRESHSERVICE_KEY_MODE", "FRESHSERVICE_OUTPUT"))
+    assert shared.stdout.strip().splitlines()[-1] == "shared full", shared.stdout
+    shared_compact = _python(code, {"FRESHSERVICE_APIKEY": "S" * 20, "FRESHSERVICE_OUTPUT": "compact"}, drop=("FRESHSERVICE_KEY_MODE",))
+    assert shared_compact.stdout.strip().splitlines()[-1] == "shared compact", shared_compact.stdout
+    per_user = _python(code, {"FRESHSERVICE_OUTPUT": " Compact "})
+    assert per_user.stdout.strip().splitlines()[-1] == "per-user compact", per_user.stdout
 
 
 if __name__ == "__main__":

@@ -41,6 +41,68 @@ FRESHSERVICE_APIKEY = os.getenv("FRESHSERVICE_APIKEY")
 # Read at import because it decides which tools register.
 KEY_MODE = (os.getenv("FRESHSERVICE_KEY_MODE") or per_user.MODE_SHARED).strip().lower()
 
+# OUTPUT MODE
+# "full" (default): every tool returns Freshservice's records as they are.
+# "compact": ticket lists return short records (see COMPACT_TICKET_FIELDS plus a
+# 500-character preview of the first message), and single tickets and
+# conversations lose the HTML copy of their text. Everything else is untouched.
+# A local model with a 262k-token window cannot read a page of 30 full records
+# (about 255k tokens, almost all of it the HTML copy); a compact page is ~8k.
+OUTPUT_FULL = "full"
+OUTPUT_COMPACT = "compact"
+OUTPUT_MODES = (OUTPUT_FULL, OUTPUT_COMPACT)
+OUTPUT_MODE = (os.getenv("FRESHSERVICE_OUTPUT") or OUTPUT_FULL).strip().lower()
+
+# The fields a compact ticket keeps, in this order, plus "description_preview".
+COMPACT_TICKET_FIELDS = (
+    "id", "type", "subject", "status", "status_name", "priority",
+    "requester_id", "responder_id", "group_id", "workspace_id",
+    "category", "sub_category", "item_category",
+    "created_at", "updated_at", "due_by",
+)
+PREVIEW_CHARS = 500
+FIELDS_ALL = "all"
+_WHITESPACE = re.compile(r"\s+")
+
+
+def compact_output() -> bool:
+    return OUTPUT_MODE == OUTPUT_COMPACT
+
+
+def _preview(text: Any) -> str:
+    """The first PREVIEW_CHARS characters of a message, whitespace collapsed."""
+    return _WHITESPACE.sub(" ", str(text or "")).strip()[:PREVIEW_CHARS]
+
+
+def compact_ticket(ticket: Dict[str, Any]) -> Dict[str, Any]:
+    """A ticket reduced to what identifies it and says where it stands."""
+    record = {field: ticket.get(field) for field in COMPACT_TICKET_FIELDS}
+    record["description_preview"] = _preview(ticket.get("description_text"))
+    return record
+
+
+def _fields_error(fields: Optional[str]) -> Optional[Dict[str, str]]:
+    if fields is None or fields == FIELDS_ALL:
+        return None
+    return {"error": f"fields must be '{FIELDS_ALL}' or left out."}
+
+
+def _compact_ticket_list(payload: Any, fields: Optional[str]) -> Any:
+    """Shrink the "tickets" list of a list response when compact output is on."""
+    if not compact_output() or fields == FIELDS_ALL or not isinstance(payload, dict):
+        return payload
+    tickets = payload.get("tickets")
+    if not isinstance(tickets, list):
+        return payload
+    return {**payload, "tickets": [compact_ticket(t) if isinstance(t, dict) else t for t in tickets]}
+
+
+def _without_html(record: Any, html_field: str) -> Any:
+    """Drop the HTML copy of a record's text when compact output is on; the plain text stays."""
+    if not compact_output() or not isinstance(record, dict):
+        return record
+    return {k: v for k, v in record.items() if k != html_field}
+
 
 class TicketSource(IntEnum):
     PHONE = 3
@@ -370,12 +432,18 @@ async def get_ticket_fields() -> Dict[str, Any]:
     
 #GET TICKETS
 @allowed_tool()
-async def get_tickets(page: Optional[int] = 1, per_page: Optional[int] = 30) -> Dict[str, Any]:
-    """Get tickets from Freshservice with pagination support."""
-    
+async def get_tickets(page: Optional[int] = 1, per_page: Optional[int] = 30, fields: Optional[str] = None) -> Dict[str, Any]:
+    """Get tickets from Freshservice with pagination support.
+
+    fields: leave out for the server's normal output; "all" returns every field of
+    every ticket even when the server is set to compact output.
+    """
+    if (problem := _fields_error(fields)) is not None:
+        return problem
+
     if page < 1:
         return {"error": "Page number must be greater than 0"}
-    
+
     if per_page < 1 or per_page > 100:
         return {"error": "Page size must be between 1 and 100"}
 
@@ -397,8 +465,8 @@ async def get_tickets(page: Optional[int] = 1, per_page: Optional[int] = 30) -> 
             pagination_info = parse_link_header(link_header)
             
             tickets = response.json()
-            
-            return {
+
+            return _compact_ticket_list({
                 "tickets": tickets,
                 "pagination": {
                     "current_page": page,
@@ -406,7 +474,7 @@ async def get_tickets(page: Optional[int] = 1, per_page: Optional[int] = 30) -> 
                     "prev_page": pagination_info.get("prev"),
                     "per_page": per_page
                 }
-            }
+            }, fields)
             
         except httpx.HTTPStatusError as e:
             return {"error": f"Failed to fetch tickets: {str(e)}"}
@@ -529,7 +597,7 @@ async def update_ticket(ticket_id: int, ticket_fields: Dict[str, Any]) -> Dict[s
             
 #FILTER TICKET 
 @allowed_tool()
-async def filter_tickets(query: str, page: int = 1, workspace_id: Optional[int] = None) -> Dict[str, Any]:
+async def filter_tickets(query: str, page: int = 1, workspace_id: Optional[int] = None, fields: Optional[str] = None) -> Dict[str, Any]:
     """Filter the tickets in Freshservice.
 
     Args:
@@ -538,11 +606,15 @@ async def filter_tickets(query: str, page: int = 1, workspace_id: Optional[int] 
                If you get 500 errors, try wrapping your query in double quotes: "your_query_here"
         page: Page number (default: 1)
         workspace_id: Optional workspace ID filter
+        fields: Leave out for the server's normal output. "all" returns every field of
+                every ticket even when the server is set to compact output.
     """
+    if (problem := _fields_error(fields)) is not None:
+        return problem
     # Freshservice API requires the query to be wrapped in double quotes
     encoded_query = urllib.parse.quote(f'"{query}"')
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/filter?query={encoded_query}&page={page}"
-    
+
     if workspace_id is not None:
         url += f"&workspace_id={workspace_id}"
 
@@ -552,7 +624,7 @@ async def filter_tickets(query: str, page: int = 1, workspace_id: Optional[int] 
         try:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
-            return response.json()
+            return _compact_ticket_list(response.json(), fields)
         except httpx.HTTPStatusError as e:
             try:
                 return {"error": str(e), "details": e.response.json()}
@@ -584,13 +656,17 @@ async def delete_ticket(ticket_id: int) -> str:
 #GET TICKET BY ID
 @allowed_tool(structured_output=False)
 async def get_ticket_by_id(ticket_id:int) -> Dict[str, Any]:
-    """Get a ticket in Freshservice."""
+    """Get a ticket in Freshservice. With compact output the HTML copy of the
+    description is left out; description_text (the plain text) stays."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}"
     headers = get_auth_headers()
 
     async with httpx.AsyncClient() as client:
         response = await client.get(url,headers=headers)
-        return response.json()
+        payload = response.json()
+        if isinstance(payload, dict) and isinstance(payload.get("ticket"), dict):
+            return {**payload, "ticket": _without_html(payload["ticket"], "description")}
+        return payload
     
 #GET ALL CHANGES
 @allowed_tool()
@@ -1836,15 +1912,19 @@ async def update_ticket_conversation(conversation_id: int,body: str)-> Dict[str,
 #GET ALL TICKET CONVERSATION
 @allowed_tool()
 async def list_all_ticket_conversation(ticket_id: int)-> Dict[str, Any]:
-    """List all conversation of a ticket in freshservice."""
+    """List all conversation of a ticket in freshservice. With compact output the
+    HTML copy of each message (body) is left out; body_text stays."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}/conversations"
     headers = get_auth_headers()
-   
+
     async with httpx.AsyncClient() as client:
         response = await client.get(url, headers=headers)
         status_code = response.status_code
         if status_code == 200:
-            return response.json()
+            payload = response.json()
+            if isinstance(payload, dict) and isinstance(payload.get("conversations"), list):
+                return {**payload, "conversations": [_without_html(c, "body") for c in payload["conversations"]]}
+            return payload
         else:
             return {"error": "Cannot fetch ticket conversations", "details": response.json()}
         
@@ -3779,8 +3859,19 @@ def build_per_user_app(owui_url: str):
     """The MCP app for per-user mode: every tool call runs with the caller's own key."""
     per_user.install_key_resolution(mcp, owui_url)
     app = mcp.streamable_http_app()
-    app.router.routes.insert(0, per_user.healthz_route(lambda: len(mcp._tool_manager.list_tools())))
+    app.router.routes.insert(0, per_user.healthz_route(lambda: len(mcp._tool_manager.list_tools()), OUTPUT_MODE))
     return app
+
+
+def check_output_mode() -> None:
+    """Refuse to start on a misspelt FRESHSERVICE_OUTPUT rather than silently running full."""
+    if OUTPUT_MODE not in OUTPUT_MODES:
+        logging.error(
+            "CONFIG_ERROR FRESHSERVICE_OUTPUT=%r is not one of %s",
+            OUTPUT_MODE,
+            ", ".join(OUTPUT_MODES),
+        )
+        raise SystemExit(1)
 
 
 def main_per_user():
@@ -3806,17 +3897,19 @@ def main_per_user():
     app = build_per_user_app(owui_url)
     tool_names = sorted(t.name for t in mcp._tool_manager.list_tools())
     logging.info(
-        "PER_USER_MODE domain=%s owui=%s tools=%d write_tools=%s",
+        "PER_USER_MODE domain=%s owui=%s tools=%d write_tools=%s output=%s",
         FRESHSERVICE_DOMAIN,
         owui_url,
         len(tool_names),
         sorted(set(tool_names) - READ_TOOLS) or "<none>",
+        OUTPUT_MODE,
     )
     uvicorn.run(app, host="0.0.0.0", port=MCP_PORT, log_level="info")
 
 
 def main():
     """Run the MCP server over streamable HTTP as an OAuth protected resource."""
+    check_output_mode()
     if KEY_MODE == per_user.MODE_PER_USER:
         main_per_user()
         return
@@ -3865,15 +3958,17 @@ def main():
         app.add_middleware(oauth.AuthMiddleware, resource_server=resource_server)
 
     logging.info(
-        "Starting Freshservice Managed MCP server on port %s path %s",
+        "Starting Freshservice Managed MCP server on port %s path %s output=%s",
         MCP_PORT,
         config.mcp_path,
+        OUTPUT_MODE,
     )
     uvicorn.run(app, host="0.0.0.0", port=MCP_PORT, log_level="info")
 
 
 def main_stdio():
     """Run over stdio for local use. No network exposure, so no gate."""
+    check_output_mode()
     if KEY_MODE != per_user.MODE_SHARED:
         logging.error("CONFIG_ERROR stdio uses the shared key; unset FRESHSERVICE_KEY_MODE")
         raise SystemExit(1)

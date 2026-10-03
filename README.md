@@ -51,6 +51,7 @@ docker run -d \
 | `FRESHSERVICE_APIKEY` | Yes\*\* | -- | Your Freshservice API key |
 | `FRESHSERVICE_DOMAIN` | Yes | -- | Your Freshservice domain (e.g., `yourcompany.freshservice.com`) |
 | `FRESHSERVICE_KEY_MODE` | No | `shared` | `shared` uses `FRESHSERVICE_APIKEY` for every call. `per-user` uses each Open WebUI caller's own key — see [Per-User Key Mode](#per-user-key-mode-open-webui) |
+| `FRESHSERVICE_OUTPUT` | No | `full` | `full` returns ticket records as Freshservice sends them. `compact` returns short ticket lists and drops HTML copies — see [Compact Output](#compact-output) |
 | `MCP_PORT` | No | `8080` | Port the MCP server listens on inside the container |
 | `MCP_PATH` | No | `/mcp` | Path the MCP endpoint is served on |
 
@@ -205,6 +206,23 @@ It registers the read tools plus three write tools, **never** registered in
   unless `private=false` is asked for**. The private flag is always sent, never
   left to Freshservice's default, and the result reports how Freshservice
   actually saved the note.
+
+## Compact Output
+
+A ticket record from Freshservice is mostly the HTML copy of its first message
+(about 40 KB on a typical ticket), so one page of 30 tickets is roughly
+250,000 tokens — too much for a chat model to read back on every turn.
+`FRESHSERVICE_OUTPUT=compact` fixes that, in either key mode:
+
+| Tool | With `compact` |
+|---|---|
+| `filter_tickets`, `get_tickets` | Each ticket becomes `id, type, subject, status, status_name, priority, requester_id, responder_id, group_id, workspace_id, category, sub_category, item_category, created_at, updated_at, due_by, description_preview` (the first 500 characters of `description_text`, whitespace collapsed). Pagination and `total` stay. `fields="all"` returns the full records; any other value is an error. |
+| `get_ticket_by_id` | The full record minus `description` (the HTML copy). `description_text`, custom fields and attachments stay. |
+| `list_all_ticket_conversation` | Each conversation minus `body` (the HTML copy). `body_text` stays. |
+| Everything else | Unchanged. |
+
+`full` (the default) leaves every tool exactly as before. Any other value
+refuses to start. In per-user mode `/healthz` reports the setting as `"output"`.
 
 ## How the Allowlist Works
 
