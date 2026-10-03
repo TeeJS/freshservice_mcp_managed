@@ -5,6 +5,7 @@ import logging
 import base64
 import json
 import urllib.parse
+from datetime import date, timedelta
 from html import escape as html_escape
 from typing import Optional, Dict, Union, Any, List, Literal
 import uvicorn
@@ -102,6 +103,56 @@ def _without_html(record: Any, html_field: str) -> Any:
     if not compact_output() or not isinstance(record, dict):
         return record
     return {k: v for k, v in record.items() if k != html_field}
+
+
+# TEXT SEARCH
+# Freshservice's filter API cannot match text or category, so search_tickets
+# reads a date window page by page and keeps the tickets whose subject or
+# plain-text description contains every word. Only the matches go back to the
+# model, as compact records.
+SEARCH_PAGE_SIZE = 30            # what /api/v2/tickets/filter returns per page
+SEARCH_PAGES_DEFAULT = 20
+SEARCH_PAGES_MAX = 40
+SEARCH_MATCH_CAP = 100
+
+
+def _search_terms(words: Optional[str]) -> List[str]:
+    """'"andria fox" Titan' -> ['andria fox', 'titan']: quoted phrases kept whole, all lower-cased."""
+    terms = []
+    for phrase, word in re.findall(r'"([^"]*)"|(\S+)', words or ""):
+        term = _WHITESPACE.sub(" ", phrase or word).strip().lower()
+        if term:
+            terms.append(term)
+    return terms
+
+
+def _search_text(ticket: Dict[str, Any]) -> str:
+    return _WHITESPACE.sub(" ", f"{ticket.get('subject') or ''} {ticket.get('description_text') or ''}").lower()
+
+
+def _same_choice(actual: Any, wanted: Optional[str]) -> bool:
+    """A category filter: exact, case-insensitive; None means 'any'."""
+    return wanted is None or str(actual or "").strip().lower() == wanted.strip().lower()
+
+
+def _search_match(ticket: Dict[str, Any], terms: List[str], category: Optional[str], sub_category: Optional[str]) -> bool:
+    if not _same_choice(ticket.get("category"), category) or not _same_choice(ticket.get("sub_category"), sub_category):
+        return False
+    if not terms:
+        return True
+    text = _search_text(ticket)
+    return all(term in text for term in terms)
+
+
+def _iso_date(value: Optional[str], name: str) -> Optional[Dict[str, str]]:
+    """None when value is a real YYYY-MM-DD date, else the error to return."""
+    try:
+        date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return {"error": f"{name} must be a date written YYYY-MM-DD, not {value!r}."}
+    if len(str(value)) != 10:
+        return {"error": f"{name} must be a date written YYYY-MM-DD, not {value!r}."}
+    return None
 
 
 class TicketSource(IntEnum):
@@ -254,7 +305,10 @@ READONLY_TOOLS = {
     "get_ticket_fields",
     "get_tickets",
     "filter_tickets",
+    "search_tickets",
     "get_ticket_by_id",
+    # Service Catalog (what a portal request asked for: a new user's name, title, systems)
+    "get_requested_items",
     # Ticket Conversations
     "list_all_ticket_conversation",
     # Ticket Tasks
@@ -285,7 +339,6 @@ READONLY_TOOLS = {
 DISABLED_READONLY_TOOLS = {
     # Service Catalog
     "list_service_items",
-    "get_requested_items",
     # Changes - Core
     "get_changes",
     "filter_changes",
@@ -630,7 +683,138 @@ async def filter_tickets(query: str, page: int = 1, workspace_id: Optional[int] 
                 return {"error": str(e), "details": e.response.json()}
             except Exception:
                 return {"error": str(e), "raw_response": e.response.text}
-        
+
+
+#SEARCH TICKETS (text match done on the server)
+@allowed_tool()
+async def search_tickets(
+    words: str,
+    created_after: str,
+    created_before: Optional[str] = None,
+    requester_email: Optional[str] = None,
+    source: Optional[int] = None,
+    group_id: Optional[int] = None,
+    status: Optional[int] = None,
+    category: Optional[str] = None,
+    sub_category: Optional[str] = None,
+    max_pages: int = SEARCH_PAGES_DEFAULT,
+    fields: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Find tickets created in a date window whose subject or plain-text description contains every word.
+
+    Use this, not repeated filter_tickets calls, to look for a person, a system or a topic
+    (an onboarding, a termination, a Titan access change). The server reads the window page
+    by page and returns only the matches, as compact records, newest first.
+
+    Args:
+        words: Words that must all appear, case-insensitive, in the subject or the plain-text
+               description. Put a phrase in double quotes: '"Jane Doe" Titan'. May be empty
+               when one of the narrowing arguments below is given.
+        created_after: Start of the window, YYYY-MM-DD, inclusive.
+        created_before: End of the window, YYYY-MM-DD, inclusive. Default: tomorrow, so up to now.
+        requester_email: Only tickets whose requester has this email address.
+        source: Only tickets from this source id (1 email, 2 portal, 3 phone, 13 onboarding, 18 offboarding).
+        group_id: Only tickets in this agent group.
+        status: Only tickets with this status id.
+        category: Only tickets with exactly this category, case-insensitive; checked on the server.
+        sub_category: The same for the sub-category.
+        max_pages: Pages of 30 to read before stopping; default 20, at most 40.
+        fields: "all" returns full ticket records instead of compact ones.
+
+    Returns matches, matched, scanned, pages, total_in_window, truncated, oldest_scanned and the
+    Freshservice query used. truncated is true when the page or match cap stopped the scan
+    early; to continue, call again with created_before set to oldest_scanned's date.
+    """
+    if (problem := _fields_error(fields)) is not None:
+        return problem
+    if created_before is None:
+        created_before = (date.today() + timedelta(days=1)).isoformat()
+    for value, name in ((created_after, "created_after"), (created_before, "created_before")):
+        if (problem := _iso_date(value, name)) is not None:
+            return problem
+    if created_before < created_after:
+        return {"error": f"created_before ({created_before}) is earlier than created_after ({created_after})."}
+    if not 1 <= max_pages <= SEARCH_PAGES_MAX:
+        return {"error": f"max_pages must be between 1 and {SEARCH_PAGES_MAX}."}
+    if requester_email is not None and ("'" in requester_email or " " in requester_email.strip() or not requester_email.strip()):
+        return {"error": f"requester_email must be one email address, not {requester_email!r}."}
+
+    terms = _search_terms(words)
+    if not terms and not any(v is not None for v in (requester_email, source, group_id, status, category, sub_category)):
+        return {"error": "Give at least one word, or a narrowing argument (requester_email, source, group_id, status, category, sub_category)."}
+
+    parts = [f"created_at:>'{created_after}'", f"created_at:<'{created_before}'"]
+    if requester_email is not None:
+        parts.append(f"email:'{requester_email.strip()}'")
+    if source is not None:
+        parts.append(f"source:{int(source)}")
+    if group_id is not None:
+        parts.append(f"group_id:{int(group_id)}")
+    if status is not None:
+        parts.append(f"status:{int(status)}")
+    query = " AND ".join(parts)
+    encoded_query = urllib.parse.quote(f'"{query}"')
+    headers = get_auth_headers()
+
+    matches: List[Dict[str, Any]] = []
+    scanned = pages = 0
+    total: Optional[int] = None
+    oldest: Optional[str] = None
+    truncated = False
+
+    async with httpx.AsyncClient() as client:
+        for page in range(1, max_pages + 1):
+            url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/filter?query={encoded_query}&page={page}"
+            try:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+            except httpx.HTTPStatusError as e:
+                try:
+                    details = e.response.json()
+                except Exception:
+                    details = e.response.text
+                return {"error": str(e), "details": details, "query": query, "pages_read": pages,
+                        "matches_so_far": matches}
+            tickets = payload.get("tickets") if isinstance(payload, dict) else None
+            if not isinstance(tickets, list):
+                return {"error": "Freshservice returned no ticket list.", "query": query, "raw_response": payload}
+            if isinstance(payload.get("total"), int):
+                total = payload["total"]
+            pages += 1
+            for ticket in tickets:
+                if not isinstance(ticket, dict):
+                    continue
+                scanned += 1
+                created = ticket.get("created_at")
+                if isinstance(created, str) and (oldest is None or created < oldest):
+                    oldest = created
+                if _search_match(ticket, terms, category, sub_category):
+                    matches.append(ticket if fields == FIELDS_ALL else compact_ticket(ticket))
+                    if len(matches) >= SEARCH_MATCH_CAP:
+                        truncated = True
+                        break
+            if truncated:
+                break
+            if len(tickets) < SEARCH_PAGE_SIZE or (total is not None and scanned >= total):
+                break
+        else:
+            # Every allowed page was read and Freshservice still had more.
+            if total is None or scanned < total:
+                truncated = True
+
+    return {
+        "matches": matches,
+        "matched": len(matches),
+        "scanned": scanned,
+        "pages": pages,
+        "total_in_window": total,
+        "truncated": truncated,
+        "oldest_scanned": oldest,
+        "query": query,
+    }
+
+
 #DELETE TICKET.
 @allowed_tool()
 async def delete_ticket(ticket_id: int) -> str:

@@ -224,6 +224,31 @@ A ticket record from Freshservice is mostly the HTML copy of its first message
 `full` (the default) leaves every tool exactly as before. Any other value
 refuses to start. In per-user mode `/healthz` reports the setting as `"output"`.
 
+## Text Search
+
+Freshservice's filter API matches requester, group, status, source and dates,
+but not text and not category. `search_tickets` fills that gap on the server:
+
+```
+search_tickets(words="Jane Doe", created_after="2026-06-01", created_before="2026-06-20")
+```
+
+It reads the window through `/api/v2/tickets/filter` 30 tickets at a time,
+keeps the tickets whose `subject` or `description_text` contains every word
+(case-insensitive; `"quoted words"` match as a phrase), and returns only those
+as compact records, newest first, with `matched`, `scanned`, `pages`,
+`total_in_window`, `truncated`, `oldest_scanned` and the `query` it used.
+
+- Narrowing passed to Freshservice: `requester_email`, `source`, `group_id`,
+  `status`. Applied on the server: `category`, `sub_category` (exact,
+  case-insensitive). `words` may be empty when a narrowing argument is given.
+- Caps: `max_pages` (default 20, at most 40) and 100 matches. When either stops
+  the scan, `truncated` is `true` and `oldest_scanned` says where to continue
+  (call again with `created_before` set to that date).
+- `fields="all"` returns full records. The matches are compact in both output
+  modes; the search is for finding tickets, `get_ticket_by_id` for reading one.
+- Cannot see attachments, images, ticket replies or service-request form fields.
+
 ## How the Allowlist Works
 
 This fork uses three sets in `server.py` to control which tools MCP clients can see:
@@ -295,6 +320,7 @@ registered on the OAuth client before it can authenticate at all.
 | `get_ticket_fields` | Get ticket form field definitions |
 | `get_tickets` | List tickets with pagination |
 | `filter_tickets` | Filter tickets by query |
+| `search_tickets` | Text search within a date window, done on the server — see [Text Search](#text-search) |
 | `get_ticket_by_id` | Get a single ticket by ID |
 
 ### Ticket Conversations

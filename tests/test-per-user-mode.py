@@ -114,6 +114,41 @@ CONVERSATIONS = {"conversations": [
 ], "meta": {"count": 2, "has_more": False}}
 
 
+def search_ticket(i):
+    """Filler for the search fixture: 70 tickets, newest first, every one with an HTML description."""
+    hours_back = 6 * i
+    day, hour = divmod(hours_back, 24)
+    created = f"2026-06-{18 - day:02d}T{23 - hour:02d}:00:00Z"
+    return {
+        "id": 80000 + i, "type": "Incident", "subject": f"Printer jam {i}", "status": 2, "status_name": "Open",
+        "priority": 1, "requester_id": 100 + i, "responder_id": 22, "group_id": 33, "workspace_id": 2,
+        "category": None, "sub_category": None, "item_category": None, "source": 1,
+        "created_at": created, "updated_at": created, "due_by": "2026-06-30T00:00:00Z",
+        "description": "<div>" + "<span>printer</span> " * 300 + "</div>",
+        "description_text": f"Printer {i} jammed again. Please fix.",
+        "custom_fields": {"lf_location": 1}, "attachments": [],
+    }
+
+
+SEARCH_TICKETS = [search_ticket(i) for i in range(70)]
+SEARCH_TICKETS[2].update({  # page 1: the name only in the subject, no text at all (a portal request)
+    "subject": "Plant A: Jane Doe, Will Call - Mon, Jun 15, 2026 - Requested by Pat Example", "type": "Service Request",
+    "source": 2, "category": "Human Resources", "sub_category": "Onboarding", "description": "", "description_text": ""})
+SEARCH_TICKETS[35].update({  # page 2: the system only in the body, subject says nothing
+    "subject": "Invoice Posting",
+    "description_text": "Hello,\n\nWe need Erin to have access to the ability to   post invoices in Titan.\nThanks"})
+SEARCH_TICKETS[40].update({  # page 2: name and system in the body
+    "subject": "Log in to Titan", "description_text": "I'm a new employee and need access to Titan. Thank you, Jane Doe"})
+SEARCH_TICKETS[65].update({  # page 3: a Dayforce termination
+    "subject": "TRANSACTION APPROVED: The Terminate an Employee transaction for John Doe 1234",
+    "requester_id": 11, "category": "Human Resources", "sub_category": "Separation", "item_category": "Full-Time Employee",
+    "description_text": "The Terminate an Employee transaction for John Doe 1234 submitted by Sam Roe 5678 was approved."})
+SEARCH_PAGES = [SEARCH_TICKETS[0:30], SEARCH_TICKETS[30:60], SEARCH_TICKETS[60:70]]
+SEARCH_WINDOW = "created_at:>'2026-06-01'"      # queries starting like this get the fixture
+BROKEN_WINDOW = "created_at:>'2026-02-01'"      # page 1 works, page 2 is a Freshservice error
+search_queries = []  # every filter query the fixture served, unquoted, in order
+
+
 async def fake_upstreams(request: httpx.Request) -> httpx.Response:
     await asyncio.sleep(0.005)  # let concurrent calls interleave
     auth = request.headers.get("authorization", "")
@@ -135,6 +170,15 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
         if auth not in (basic(KEY_A), basic(KEY_B)):
             return httpx.Response(401, json={"message": "invalid credentials"})
         if request.method == "GET" and request.url.path == "/api/v2/tickets/filter":
+            query = request.url.params.get("query", "").strip('"')
+            page = int(request.url.params.get("page", "1"))
+            if query.startswith(SEARCH_WINDOW):
+                search_queries.append(query)
+                return httpx.Response(200, json={"tickets": SEARCH_PAGES[page - 1] if page <= 3 else [], "total": 70})
+            if query.startswith(BROKEN_WINDOW):
+                if page == 1:
+                    return httpx.Response(200, json={"tickets": SEARCH_PAGES[0], "total": 70})
+                return httpx.Response(500, json={"description": "boom"})
             return httpx.Response(200, json={"tickets": LIST_PAGE, "total": len(LIST_PAGE)})
         if request.method == "GET" and request.url.path == "/api/v2/tickets":
             return httpx.Response(200, json=LIST_PAGE,
@@ -260,7 +304,7 @@ async def mcp_tests(results):
             async def healthz_needs_no_token():
                 r = await client.get("/healthz")
                 assert r.status_code == 200, r.text
-                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 25, "output": "full"}, r.json()
+                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 27, "output": "full"}, r.json()
 
             async def tool_list_is_exactly_the_per_user_tools():
                 result = await mcp_request(client, None, "tools/list")
@@ -604,6 +648,103 @@ async def mcp_tests(results):
                 assert not is_error and in_compact == in_full and in_compact["preview"] is True, (in_full, in_compact)
                 assert any("No Titan account" in line for line in in_compact["lines"]), in_compact["lines"]
 
+            # --- search_tickets -------------------------------------------------------
+
+            async def search(**arguments):
+                arguments.setdefault("created_after", "2026-06-01")
+                arguments.setdefault("created_before", "2026-06-19")
+                return await tool("search_tickets", **arguments)
+
+            def ids(r):
+                return [t["id"] for t in r["matches"]]
+
+            async def search_finds_words_in_subject_or_body():
+                r = await search(words="Jane Doe")
+                assert ids(r) == [80002, 80040], ids(r)
+                assert (r["matched"], r["scanned"], r["pages"], r["total_in_window"], r["truncated"]) == (2, 70, 3, 70, False), r
+                assert r["oldest_scanned"] == SEARCH_TICKETS[69]["created_at"], r["oldest_scanned"]
+                assert r["query"] == "created_at:>'2026-06-01' AND created_at:<'2026-06-19'", r["query"]
+                assert all(list(t.keys()) == expected_keys for t in r["matches"]), [list(t.keys()) for t in r["matches"]]
+                assert "<div" not in json.dumps(r) and not any("description" in t for t in r["matches"])
+
+            async def search_matches_body_phrases_and_case():
+                assert ids(await search(words="TITAN invoices")) == [80035]
+                assert ids(await search(words='"post invoices"')) == [80035]
+                assert ids(await search(words='"invoices post"')) == []
+                assert ids(await search(words="titan")) == [80035, 80040]
+                assert ids(await search(words="printer 7")) == [80007, 80017, 80027, 80037, 80047, 80057, 80067]
+
+            async def search_passes_narrowing_to_freshservice():
+                mark = len(search_queries)
+                r = await search(words="", requester_email="notify@hr.example.com", source=1, group_id=33, status=5)
+                expected = ("created_at:>'2026-06-01' AND created_at:<'2026-06-19' AND email:'notify@hr.example.com'"
+                            " AND source:1 AND group_id:33 AND status:5")
+                assert search_queries[mark:] == [expected] * 3, search_queries[mark:]
+                assert r["query"] == expected and r["scanned"] == 70, r["query"]
+
+            async def search_filters_category_on_the_server():
+                assert ids(await search(words="", category="human resources", sub_category="SEPARATION")) == [80065]
+                assert ids(await search(words="", category="Human Resources")) == [80002, 80065]
+                assert ids(await search(words="Jane", category="Human Resources")) == [80002]
+
+            async def search_page_cap_is_reported():
+                r = await search(words="1234", max_pages=2)
+                assert ids(r) == [] and r["truncated"] is True and (r["scanned"], r["pages"]) == (60, 2), r
+                assert r["oldest_scanned"] == SEARCH_TICKETS[59]["created_at"], r["oldest_scanned"]
+                r = await search(words="1234", max_pages=3)
+                assert ids(r) == [80065] and r["truncated"] is False, r
+
+            async def search_match_cap_is_reported():
+                cap = server.SEARCH_MATCH_CAP
+                server.SEARCH_MATCH_CAP = 5
+                try:
+                    r = await search(words="printer")
+                finally:
+                    server.SEARCH_MATCH_CAP = cap
+                # Five matches by the sixth ticket (the third is the Doe request): the scan stops there,
+                # so "scanned" and "oldest_scanned" say where to continue from, not what page was fetched.
+                assert (r["matched"], r["truncated"], r["pages"], r["scanned"]) == (5, True, 1, 6), r
+                assert r["oldest_scanned"] == SEARCH_TICKETS[5]["created_at"], r["oldest_scanned"]
+
+            async def search_refuses_bad_input_without_a_call():
+                bad = [
+                    dict(words="x", created_after="2026-13-01"),
+                    dict(words="x", created_after="20260601"),
+                    dict(words="x", created_after="2026-06-01", created_before="2026-05-31"),
+                    dict(words="x", created_after="2026-06-01", max_pages=0),
+                    dict(words="x", created_after="2026-06-01", max_pages=41),
+                    dict(words="x", created_after="2026-06-01", fields="summary"),
+                    dict(words="", created_after="2026-06-01"),
+                    dict(words='""', created_after="2026-06-01"),
+                    dict(words="x", created_after="2026-06-01", requester_email="not an email"),
+                ]
+                for arguments in bad:
+                    mark = len(outbound)
+                    r = await tool("search_tickets", **arguments)
+                    assert "error" in r, (arguments, r)
+                    assert not since(mark, FS), f"Freshservice was called for {arguments}"
+
+            async def search_fields_all_returns_full_records():
+                r = await search(words="Jane Doe", fields="all")
+                assert r["matches"] == [SEARCH_TICKETS[2], SEARCH_TICKETS[40]], ids(r)
+
+            async def search_is_the_same_in_compact_mode():
+                in_full = await search(words="titan")
+                with compact():
+                    in_compact = await search(words="titan")
+                assert in_full == in_compact
+
+            async def search_defaults_created_before_to_tomorrow():
+                r = await tool("search_tickets", words="Jane", created_after="2026-06-01")
+                tomorrow = (server.date.today() + server.timedelta(days=1)).isoformat()
+                assert r["query"] == f"created_at:>'2026-06-01' AND created_at:<'{tomorrow}'", r["query"]
+                assert ids(r) == [80002, 80040]
+
+            async def search_reports_a_freshservice_error_with_what_it_had():
+                r = await tool("search_tickets", words="printer", created_after="2026-02-01", created_before="2026-02-28")
+                assert "error" in r and r["details"] == {"description": "boom"} and r["pages_read"] == 1, r
+                assert [t["id"] for t in r["matches_so_far"]] == [80000 + i for i in range(30) if i not in (2,)], r["matches_so_far"][:3]
+
             for fn in [
                 healthz_needs_no_token,
                 tool_list_is_exactly_the_per_user_tools,
@@ -643,6 +784,17 @@ async def mcp_tests(results):
                 compact_single_ticket_drops_only_the_html,
                 compact_conversations_drop_only_the_html_body,
                 compact_mode_leaves_the_term_tool_alone,
+                search_finds_words_in_subject_or_body,
+                search_matches_body_phrases_and_case,
+                search_passes_narrowing_to_freshservice,
+                search_filters_category_on_the_server,
+                search_page_cap_is_reported,
+                search_match_cap_is_reported,
+                search_refuses_bad_input_without_a_call,
+                search_fields_all_returns_full_records,
+                search_is_the_same_in_compact_mode,
+                search_defaults_created_before_to_tomorrow,
+                search_reports_a_freshservice_error_with_what_it_had,
             ]:
                 await asyncio.wait_for(check(fn.__name__, fn()), timeout=60)
 
@@ -677,7 +829,7 @@ def _python(code, env_overrides, drop=()):
 
 
 def test_shared_mode_tool_list_is_unchanged():
-    """The Unraid deployment: no FRESHSERVICE_KEY_MODE, a shared key, same 22 tools."""
+    """The Unraid deployment: no FRESHSERVICE_KEY_MODE, a shared key, the 24 read tools."""
     r = _python(
         "import json; from freshservice_mcp.server import mcp, KEY_MODE, READONLY_TOOLS;"
         "print(json.dumps([KEY_MODE, sorted(t.name for t in mcp._tool_manager.list_tools()), sorted(READONLY_TOOLS)]))",
@@ -688,7 +840,8 @@ def test_shared_mode_tool_list_is_unchanged():
     mode, registered, readonly = json.loads(r.stdout.strip().splitlines()[-1])
     assert mode == "shared", mode
     assert registered == readonly, set(registered) ^ set(readonly)
-    assert len(registered) == 22, len(registered)
+    assert len(registered) == 24, len(registered)
+    assert "search_tickets" in registered and "get_requested_items" in registered
     assert "update_ticket_task_status" not in registered
     assert "complete_term_tasks" not in registered
     assert "create_ticket_note" not in registered
