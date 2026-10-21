@@ -105,7 +105,21 @@ TICKETS = {
     60018: {**term_ticket("Resolution notes", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None, "resolution_notes": None},
     60019: {**term_ticket("Resolution ignored", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None,
             "resolution_notes": "", "ignores_resolution": True},
+    # Location: lf_location holds a Freshservice location id.
+    60020: {**term_ticket("No location", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None,
+            "custom_fields": {"lf_location": None}},
+    60021: {**term_ticket("Has a location", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None,
+            "custom_fields": {"lf_location": 33000357140}},
+    60022: {**term_ticket("Location ignored", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None,
+            "custom_fields": {"lf_location": None}, "ignores_location": True},
+    60023: {**term_ticket("Location lookup", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None,
+            "custom_fields": {"lf_location": None}},
 }
+# 130 filler sites push the real ones onto page 2 of the 100-per-page list.
+LOCATIONS = [{"id": 900 + i, "name": f"Site {i}"} for i in range(130)] + [
+    {"id": 33000357140, "name": "Portland"}, {"id": 4242, "name": "Seattle"}, {"id": 4243, "name": "Seattle Annex"},
+    {"id": 5001, "name": "Twin"}, {"id": 5002, "name": "twin"}]
+locations_forbidden = {"on": False}
 AGENT_IDS = {KEY_A: 5001, KEY_B: 5002}  # the Freshservice agent each key belongs to
 agent_lookup_fails = {"on": False}      # when on, /agents/me answers 403
 
@@ -192,6 +206,11 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
                 return httpx.Response(403, json={"code": "access_denied"})
             key = KEY_A if auth == basic(KEY_A) else KEY_B
             return httpx.Response(200, json={"agent": {"id": AGENT_IDS[key], "first_name": "Test"}})
+        if request.method == "GET" and request.url.path == "/api/v2/locations":
+            if locations_forbidden["on"]:
+                return httpx.Response(403, json={"code": "access_denied"})
+            page, per_page = int(request.url.params.get("page", "1")), int(request.url.params.get("per_page", "30"))
+            return httpx.Response(200, json={"locations": LOCATIONS[(page - 1) * per_page: page * per_page]})
         if request.method == "GET" and request.url.path == "/api/v2/tickets/filter":
             query = request.url.params.get("query", "").strip('"')
             page = int(request.url.params.get("page", "1"))
@@ -236,6 +255,10 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
                 if field == "status" and ticket.get("ignores_status"):
                     continue
                 if field == "resolution_notes" and ticket.get("ignores_resolution"):
+                    continue
+                if field == "custom_fields":
+                    if not ticket.get("ignores_location"):
+                        ticket["custom_fields"] = {**(ticket.get("custom_fields") or {}), **value}
                     continue
                 ticket[field] = value
             return httpx.Response(200, json={"ticket": {k: v for k, v in ticket.items() if k != "tasks"}})
@@ -686,7 +709,8 @@ async def mcp_tests(results):
                 mark = len(outbound)
                 await fix(ticket_id=60010, status="Open", priority=4, responder_id=1)
                 put_bodies = [p["body"] for p in since(mark, FS, "PUT")]
-                assert all(set(b) <= {"status", "category", "sub_category", "item_category", "resolution_notes", "responder_id"} for b in put_bodies), put_bodies
+                assert all(set(b) <= {"status", "category", "sub_category", "item_category", "resolution_notes", "responder_id", "custom_fields"} for b in put_bodies), put_bodies
+                assert not any("custom_fields" in b for b in put_bodies), "a custom field was written without a location"
                 assert not any("responder_id" in b for b in put_bodies), "an agent was assigned without assign_to_me"
 
             async def fix_assigns_to_the_key_owner_and_nobody_else():
@@ -774,6 +798,77 @@ async def mcp_tests(results):
             async def fix_reports_a_resolution_note_freshservice_did_not_save():
                 is_error, r = await fix(ticket_id=60019, resolution_note="Fixed it")
                 assert "did not save resolution_note as asked" in r["line"], r
+
+            def fs_paths(mark):
+                return [(o["method"], o["path"]) for o in since(mark, FS)]
+
+            async def fix_sets_location_by_name_across_pages():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60020, location="  portland ")
+                assert not is_error, r
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [{"custom_fields": {"lf_location": 33000357140}}]
+                assert fs_paths(mark).count(("GET", "/api/v2/locations")) == 2, fs_paths(mark)  # 135 locations: two pages
+                assert r["changes"] == {"location": {"from": "(none)", "to": "Portland"}}, r
+                assert r["line"].endswith("location (none) to Portland."), r
+                assert TICKETS[60020]["custom_fields"]["lf_location"] == 33000357140
+
+            async def fix_sets_location_by_id_without_a_lookup():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60023, location="4242")
+                assert not is_error, r
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [{"custom_fields": {"lf_location": 4242}}]
+                assert ("GET", "/api/v2/locations") not in fs_paths(mark), "an id needed no lookup"
+                assert r["changes"]["location"] == {"from": "(none)", "to": "location 4242"}, r
+
+            async def fix_location_name_must_match_one_location_exactly():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60020, location="Seattle")  # exact beats "Seattle Annex"
+                assert r["changes"]["location"]["to"] == "Seattle", r
+                before = len(since(mark, FS, "PUT"))
+                is_error, r = await fix(ticket_id=60021, location="Seat")
+                assert "No location named 'Seat'" in r["error"] and "Seattle, Seattle Annex" in r["error"], r
+                is_error, r = await fix(ticket_id=60021, location="Nowhere")
+                assert "No location named 'Nowhere'" in r["error"] and "Close matches" not in r["error"], r
+                is_error, r = await fix(ticket_id=60021, location="TWIN")  # two locations differ only by case
+                assert "More than one location" in r["error"] and "5001" in r["error"] and "5002" in r["error"], r
+                assert len(since(mark, FS, "PUT")) == before, "a PUT went out for a location that didn't resolve"
+
+            async def fix_location_lookup_failure_changes_nothing_and_ids_still_work():
+                mark = len(outbound)
+                locations_forbidden["on"] = True
+                try:
+                    is_error, r = await fix(ticket_id=60021, status="On Hold", location="Seattle")
+                    assert "Couldn't look up locations" in r["error"] and "numeric location id" in r["error"], r
+                    assert not since(mark, FS, "PUT"), "the status changed though the location could not be looked up"
+                    is_error, r = await fix(ticket_id=60022, location="4243")  # ids need no lookup
+                    assert not is_error and "error" not in r, r
+                finally:
+                    locations_forbidden["on"] = False
+
+            async def fix_location_unchanged_sends_nothing():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60021, location="Portland")
+                assert r["changed"] is False and not since(mark, FS, "PUT"), r
+
+            async def fix_location_rides_with_assignment_status_and_resolution():
+                mark = len(outbound)
+                TICKETS[60023]["responder_id"] = None
+                is_error, r = await fix(ticket_id=60023, location="Portland", assign_to_me=True, status="Resolved", resolution_note="Done")
+                assert not is_error, r
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [
+                    {"status": 4, "resolution_notes": "Done", "responder_id": 5001, "custom_fields": {"lf_location": 33000357140}}]
+                assert r["changes"]["location"] == {"from": "location 4242", "to": "Portland"}, r
+
+            async def fix_refuses_a_blank_location_without_a_call():
+                for blank in ["", "  "]:
+                    mark = len(outbound)
+                    is_error, r = await fix(ticket_id=60020, location=blank)
+                    assert is_error or "error" in r, (blank, r)
+                    assert not since(mark, FS), "Freshservice was called for a blank location"
+
+            async def fix_reports_a_location_freshservice_did_not_save():
+                is_error, r = await fix(ticket_id=60022, location="Seattle")
+                assert "did not save location as asked" in r["line"], r
 
             async def fix_without_assign_to_me_never_looks_up_the_agent():
                 mark = len(outbound)
@@ -1022,6 +1117,14 @@ async def mcp_tests(results):
                 fix_long_resolution_note_is_shortened_in_the_report_only,
                 fix_refuses_a_blank_resolution_note_without_a_call,
                 fix_reports_a_resolution_note_freshservice_did_not_save,
+                fix_sets_location_by_name_across_pages,
+                fix_sets_location_by_id_without_a_lookup,
+                fix_location_name_must_match_one_location_exactly,
+                fix_location_lookup_failure_changes_nothing_and_ids_still_work,
+                fix_location_unchanged_sends_nothing,
+                fix_location_rides_with_assignment_status_and_resolution,
+                fix_refuses_a_blank_location_without_a_call,
+                fix_reports_a_location_freshservice_did_not_save,
                 full_output_is_unchanged_by_default,
                 compact_list_records_have_only_the_listed_fields,
                 compact_page_of_30_is_small,

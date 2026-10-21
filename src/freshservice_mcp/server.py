@@ -2224,6 +2224,35 @@ async def _my_agent_id(client: httpx.AsyncClient, headers: Dict[str, str]) -> in
         raise ValueError("the response has no agent id")
     return agent_id
 
+async def _find_location(client: httpx.AsyncClient, headers: Dict[str, str], text: str) -> tuple:
+    """(location id, name or None) from a numeric id or a location name.
+
+    A name is matched exactly, ignoring case and spacing, against Freshservice's
+    location list. Raises ValueError with a message for the user when it can't
+    be resolved to exactly one location.
+    """
+    if text.isascii() and text.isdigit():
+        return int(text), None
+    wanted = _WHITESPACE.sub(" ", text).strip().casefold()
+    names: Dict[int, str] = {}
+    try:
+        for page in range(1, 11):
+            response = await client.get(f"https://{FRESHSERVICE_DOMAIN}/api/v2/locations", headers=headers, params={"page": page, "per_page": 100})
+            response.raise_for_status()
+            batch = response.json().get("locations") or []
+            names.update({loc["id"]: loc["name"] for loc in batch})
+            if len(batch) < 100:
+                break
+    except Exception as e:
+        raise ValueError(f"Couldn't look up locations ({str(e)}). Give the numeric location id instead.")
+    exact = [(loc_id, name) for loc_id, name in names.items() if _WHITESPACE.sub(" ", name).strip().casefold() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        raise ValueError(f"More than one location is named '{text}' (ids {', '.join(str(i) for i, _ in exact)}). Give the numeric location id.")
+    close = sorted(name for name in names.values() if wanted in name.casefold())[:10]
+    raise ValueError(f"No location named '{text}'." + (f" Close matches: {', '.join(close)}." if close else ""))
+
 @allowed_tool()
 async def update_ticket_status_category(
     ticket_id: int,
@@ -2233,8 +2262,9 @@ async def update_ticket_status_category(
     item_category: Optional[str] = None,
     assign_to_me: bool = False,
     resolution_note: Optional[str] = None,
+    location: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Change a ticket's status, its category, sub_category and item_category, its resolution note, and/or assign it to the person asking (assign_to_me=true sets "Assigned to" to them; it can't assign anyone else). Only call this when the user explicitly asks for that change. Give only what should change. resolution_note is plain text and replaces any existing one; give it together with status "Resolved" when the user says how the ticket was resolved. Changing category means also giving the sub_category (and item_category when the ticket has one) it belongs under; the tool refuses otherwise. Changes nothing else on the ticket. Print the returned line."""
+    """Change a ticket's status, its category, sub_category and item_category, its resolution note, its Location, and/or assign it to the person asking (assign_to_me=true sets "Assigned to" to them; it can't assign anyone else). Only call this when the user explicitly asks for that change. Give only what should change. location is a location name as the user says it, or a numeric location id; a name that matches no location, or more than one, is refused and nothing changes. Freshservice may refuse any update to a ticket that has no Location, so set the location in the same call. resolution_note is plain text and replaces any existing one; give it together with status "Resolved" when the user says how the ticket was resolved. Changing category means also giving the sub_category (and item_category when the ticket has one) it belongs under; the tool refuses otherwise. Changes nothing else on the ticket. Print the returned line."""
     wanted = {
         field: value.strip()
         for field, value in (("category", category), ("sub_category", sub_category), ("item_category", item_category))
@@ -2247,8 +2277,11 @@ async def update_ticket_status_category(
     note = resolution_note.strip() if resolution_note is not None else None
     if note is not None and not note:
         return {"error": "resolution_note can't be blank. Nothing was changed."}
-    if status is None and not wanted and not assign_to_me and note is None:
-        return {"error": "Nothing to change: give a status, a category, a resolution_note or assign_to_me. Nothing was changed."}
+    place = location.strip() if location is not None else None
+    if place is not None and not place:
+        return {"error": "location can't be blank. Nothing was changed."}
+    if status is None and not wanted and not assign_to_me and note is None and place is None:
+        return {"error": "Nothing to change: give a status, a category, a location, a resolution_note or assign_to_me. Nothing was changed."}
 
     headers = get_auth_headers()
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}"
@@ -2280,6 +2313,16 @@ async def update_ticket_status_category(
             payload["responder_id"] = my_id
             if current.get("responder_id") != my_id:
                 differs["responder_id"] = my_id
+        location_id: Optional[int] = None
+        location_name: Optional[str] = None
+        if place is not None:
+            try:
+                location_id, location_name = await _find_location(client, headers, place)
+            except ValueError as e:
+                return {"error": f"{str(e)} Nothing was changed."}
+            payload["custom_fields"] = {"lf_location": location_id}
+            if (current.get("custom_fields") or {}).get("lf_location") != location_id:
+                differs["lf_location"] = location_id
         if not differs:
             return {"changed": False, "line": f"{ticket_link} already has those values. Nothing was changed."}
 
@@ -2305,8 +2348,18 @@ async def update_ticket_status_category(
     changes = {}
     not_as_asked = []
     for field in differs:
+        label = {"responder_id": "assigned_to", "resolution_notes": "resolution_note", "lf_location": "location"}.get(field, field)
+        if field == "lf_location":
+            before = (current.get("custom_fields") or {}).get(field)
+            after = (saved.get("custom_fields") or {}).get(field, location_id)
+            changes[label] = {
+                "from": "(none)" if before is None else f"location {before}",
+                "to": (location_name or f"location {location_id}") if after == location_id else ("(none)" if after is None else f"location {after}"),
+            }
+            if after != location_id:
+                not_as_asked.append(label)
+            continue
         after = saved.get(field, payload[field])
-        label = {"responder_id": "assigned_to", "resolution_notes": "resolution_note"}.get(field, field)
         changes[label] = {"from": _ticket_value_text(field, current.get(field), my_id), "to": _ticket_value_text(field, after, my_id)}
         if field == "resolution_notes":
             # Freshservice may reformat the text it stores; only an empty note means it wasn't saved.

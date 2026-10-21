@@ -197,7 +197,13 @@ It registers the read tools plus four write tools, **never** registered in
   hardcoded from `/api/v2/ticket_form_fields`) and/or its `category`,
   `sub_category` and `item_category`, and/or "Assigned to", and/or its resolution
   note (`resolution_note`, plain text, replaces any existing one, sent as the
-  ticket's `resolution_notes`), and nothing else on the ticket. It cannot set `Closed` or `Pending`, which aren't in that dropdown.
+  ticket's `resolution_notes`), and/or its Location (`location`, a name or a numeric
+  id; sent as the `lf_location` custom field, which holds a location id), and
+  nothing else on the ticket. A name is matched exactly, ignoring case, against
+  Freshservice's `/api/v2/locations` list; no match, several matches or a refused
+  lookup change nothing, and the numeric id always works without a lookup. Your
+  Freshservice refuses updates to a ticket that has no Location, so set it in the
+  same call. It cannot set `Closed` or `Pending`, which aren't in that dropdown.
   `assign_to_me=true` assigns the ticket to the owner of the caller's own API key
   (found with `/api/v2/agents/me`); there is no way to name another agent, and the
   result says who the ticket was taken from. If the agent lookup fails, nothing is
