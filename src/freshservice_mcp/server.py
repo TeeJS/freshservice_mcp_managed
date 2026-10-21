@@ -2266,7 +2266,7 @@ async def update_ticket_status_category(
     item_category: Optional[str] = None,
     assign_to_me: bool = False,
     resolution_note: Optional[str] = None,
-    location: Optional[str] = None,
+    location: Optional[Union[str, int]] = None,
 ) -> Dict[str, Any]:
     """Change a ticket's status, its category, sub_category and item_category, its resolution note, its Location, and/or assign it to the person asking (assign_to_me=true sets "Assigned to" to them; it can't assign anyone else). Only call this when the user explicitly asks for that change. Give only what should change. location is a location name as the user says it, or a numeric location id; a name that matches no location, or more than one, is refused and nothing changes. Freshservice may refuse any update to a ticket that has no Location, so set the location in the same call. resolution_note is plain text and replaces any existing one; give it together with status "Resolved" when the user says how the ticket was resolved. Changing category means also giving the sub_category (and item_category when the ticket has one) it belongs under; the tool refuses otherwise. Changes nothing else on the ticket. Print the returned line."""
     wanted = {
@@ -2281,7 +2281,7 @@ async def update_ticket_status_category(
     note = resolution_note.strip() if resolution_note is not None else None
     if note is not None and not note:
         return {"error": "resolution_note can't be blank. Nothing was changed."}
-    place = location.strip() if location is not None else None
+    place = str(location).strip() if location is not None else None
     if place is not None and not place:
         return {"error": "location can't be blank. Nothing was changed."}
     if status is None and not wanted and not assign_to_me and note is None and place is None:

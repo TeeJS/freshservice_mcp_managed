@@ -823,6 +823,14 @@ async def mcp_tests(results):
                 assert ("GET", "/api/v2/locations") not in fs_paths(mark), "an id needed no lookup"
                 assert r["changes"]["location"] == {"from": "(none)", "to": "location 4242"}, r
 
+            async def fix_location_id_may_be_sent_as_a_number():
+                mark = len(outbound)
+                is_error, text = await call_tool(client, "tok-a", "update_ticket_status_category", {"ticket_id": 60021, "location": 4243})
+                assert not is_error, text
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [{"custom_fields": {"lf_location": 4243}}]
+                assert ("GET", "/api/v2/locations") not in fs_paths(mark), "a number is an id and needs no lookup"
+                TICKETS[60021]["custom_fields"]["lf_location"] = 33000357140  # put it back for the tests after this
+
             async def fix_location_name_must_match_one_location_exactly():
                 mark = len(outbound)
                 is_error, r = await fix(ticket_id=60020, location="Seattle")  # exact beats "Seattle Annex"
@@ -1135,6 +1143,7 @@ async def mcp_tests(results):
                 ticket_can_carry_the_requesters_name_and_email,
                 fix_sets_location_by_name_across_pages,
                 fix_sets_location_by_id_without_a_lookup,
+                fix_location_id_may_be_sent_as_a_number,
                 fix_location_name_must_match_one_location_exactly,
                 fix_location_lookup_failure_changes_nothing_and_ids_still_work,
                 fix_location_unchanged_sends_nothing,
