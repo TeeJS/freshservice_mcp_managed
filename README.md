@@ -195,8 +195,9 @@ It registers the read tools plus four write tools, **never** registered in
   `Pending Approval`, `Pending Customer Response`, `On Hold`, `Pending Vendor`,
   `Work In Progress`: the statuses in the agent dropdown, with this tenant's IDs
   hardcoded from `/api/v2/ticket_form_fields`) and/or its `category`,
-  `sub_category` and `item_category`, and/or "Assigned to", and nothing else on the
-  ticket. It cannot set `Closed` or `Pending`, which aren't in that dropdown.
+  `sub_category` and `item_category`, and/or "Assigned to", and/or its resolution
+  note (`resolution_note`, plain text, replaces any existing one, sent as the
+  ticket's `resolution_notes`), and nothing else on the ticket. It cannot set `Closed` or `Pending`, which aren't in that dropdown.
   `assign_to_me=true` assigns the ticket to the owner of the caller's own API key
   (found with `/api/v2/agents/me`); there is no way to name another agent, and the
   result says who the ticket was taken from. If the agent lookup fails, nothing is

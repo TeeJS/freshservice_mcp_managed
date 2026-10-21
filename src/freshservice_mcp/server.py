@@ -2209,6 +2209,9 @@ def _ticket_value_text(field: str, value: Any, me: Optional[int] = None) -> str:
         return "(none)"
     if field == "status":
         return TICKET_STATUS_NAMES.get(value, f"status {value}")
+    if field == "resolution_notes":
+        text = _WHITESPACE.sub(" ", str(value)).strip()
+        return text if len(text) <= 60 else text[:57] + "..."
     return str(value)
 
 async def _my_agent_id(client: httpx.AsyncClient, headers: Dict[str, str]) -> int:
@@ -2229,8 +2232,9 @@ async def update_ticket_status_category(
     sub_category: Optional[str] = None,
     item_category: Optional[str] = None,
     assign_to_me: bool = False,
+    resolution_note: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Change a ticket's status, its category, sub_category and item_category, and/or assign it to the person asking (assign_to_me=true sets "Assigned to" to them; it can't assign anyone else). Only call this when the user explicitly asks for that change. Give only what should change. Changing category means also giving the sub_category (and item_category when the ticket has one) it belongs under; the tool refuses otherwise. Changes nothing else on the ticket. Print the returned line."""
+    """Change a ticket's status, its category, sub_category and item_category, its resolution note, and/or assign it to the person asking (assign_to_me=true sets "Assigned to" to them; it can't assign anyone else). Only call this when the user explicitly asks for that change. Give only what should change. resolution_note is plain text and replaces any existing one; give it together with status "Resolved" when the user says how the ticket was resolved. Changing category means also giving the sub_category (and item_category when the ticket has one) it belongs under; the tool refuses otherwise. Changes nothing else on the ticket. Print the returned line."""
     wanted = {
         field: value.strip()
         for field, value in (("category", category), ("sub_category", sub_category), ("item_category", item_category))
@@ -2240,8 +2244,11 @@ async def update_ticket_status_category(
         return {"error": "category, sub_category and item_category can't be blank. Nothing was changed."}
     if status is not None and status not in TICKET_STATUS_CODES:
         return {"error": f"status must be one of: {', '.join(TICKET_STATUS_CODES)}. Nothing was changed."}
-    if status is None and not wanted and not assign_to_me:
-        return {"error": "Nothing to change: give a status, a category or assign_to_me. Nothing was changed."}
+    note = resolution_note.strip() if resolution_note is not None else None
+    if note is not None and not note:
+        return {"error": "resolution_note can't be blank. Nothing was changed."}
+    if status is None and not wanted and not assign_to_me and note is None:
+        return {"error": "Nothing to change: give a status, a category, a resolution_note or assign_to_me. Nothing was changed."}
 
     headers = get_auth_headers()
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}"
@@ -2260,6 +2267,10 @@ async def update_ticket_status_category(
             payload["status"] = TICKET_STATUS_CODES[status]
             if current.get("status") != payload["status"]:
                 differs["status"] = payload["status"]
+        if note is not None:
+            payload["resolution_notes"] = note
+            if note != str(current.get("resolution_notes") or "").strip():
+                differs["resolution_notes"] = note
         my_id: Optional[int] = None
         if assign_to_me:
             try:
@@ -2295,9 +2306,16 @@ async def update_ticket_status_category(
     not_as_asked = []
     for field in differs:
         after = saved.get(field, payload[field])
-        label = "assigned_to" if field == "responder_id" else field
+        label = {"responder_id": "assigned_to", "resolution_notes": "resolution_note"}.get(field, field)
         changes[label] = {"from": _ticket_value_text(field, current.get(field), my_id), "to": _ticket_value_text(field, after, my_id)}
-        if (after != payload[field]) if field in ("status", "responder_id") else not _same_text(after, payload[field]):
+        if field == "resolution_notes":
+            # Freshservice may reformat the text it stores; only an empty note means it wasn't saved.
+            saved_as_asked = bool(str(after or "").strip())
+        elif field in ("status", "responder_id"):
+            saved_as_asked = after == payload[field]
+        else:
+            saved_as_asked = _same_text(after, payload[field])
+        if not saved_as_asked:
             not_as_asked.append(label)
     summary = "; ".join(f"{label} {change['from']} to {change['to']}" for label, change in changes.items())
     line = f"Updated {ticket_link}: {summary}."

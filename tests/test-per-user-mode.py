@@ -102,6 +102,9 @@ TICKETS = {
     60015: {**term_ticket("Someone else's", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None, "responder_id": 777},
     60016: {**term_ticket("Already mine", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None, "responder_id": 5001},
     60017: {**term_ticket("Agent lookup fails", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None, "responder_id": None},
+    60018: {**term_ticket("Resolution notes", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None, "resolution_notes": None},
+    60019: {**term_ticket("Resolution ignored", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None,
+            "resolution_notes": "", "ignores_resolution": True},
 }
 AGENT_IDS = {KEY_A: 5001, KEY_B: 5002}  # the Freshservice agent each key belongs to
 agent_lookup_fails = {"on": False}      # when on, /agents/me answers 403
@@ -230,8 +233,11 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
                 return httpx.Response(400, json={"description": "Validation failed", "errors": [
                     {"field": "sub_category", "message": "Invalid value", "code": "invalid_value"}]})
             for field, value in body.items():
-                if not (field == "status" and ticket.get("ignores_status")):
-                    ticket[field] = value
+                if field == "status" and ticket.get("ignores_status"):
+                    continue
+                if field == "resolution_notes" and ticket.get("ignores_resolution"):
+                    continue
+                ticket[field] = value
             return httpx.Response(200, json={"ticket": {k: v for k, v in ticket.items() if k != "tasks"}})
         if request.method == "PUT" and len(parts) == 6 and parts[4] == "tasks":
             task_id = int(parts[5])
@@ -680,7 +686,8 @@ async def mcp_tests(results):
                 mark = len(outbound)
                 await fix(ticket_id=60010, status="Open", priority=4, responder_id=1)
                 put_bodies = [p["body"] for p in since(mark, FS, "PUT")]
-                assert all(set(b) <= {"status", "category", "sub_category", "item_category"} for b in put_bodies), put_bodies
+                assert all(set(b) <= {"status", "category", "sub_category", "item_category", "resolution_notes", "responder_id"} for b in put_bodies), put_bodies
+                assert not any("responder_id" in b for b in put_bodies), "an agent was assigned without assign_to_me"
 
             async def fix_assigns_to_the_key_owner_and_nobody_else():
                 for token, key, ticket_id in [("tok-a", KEY_A, 60014), ("tok-b", KEY_B, 60015)]:
@@ -728,6 +735,45 @@ async def mcp_tests(results):
                     agent_lookup_fails["on"] = False
                 assert "Couldn't tell which Freshservice agent you are" in r["error"] and "Nothing was changed" in r["error"], r
                 assert not since(mark, FS, "PUT"), "the status was changed though the assignment could not be"
+
+            async def fix_resolves_with_a_resolution_note():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60018, status="Resolved", resolution_note="  Replaced the toner and ran a test page.\nAll good. ")
+                assert not is_error, r
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [
+                    {"status": 4, "resolution_notes": "Replaced the toner and ran a test page.\nAll good."}]
+                assert r["changes"]["resolution_note"] == {"from": "(none)", "to": "Replaced the toner and ran a test page. All good."}, r
+                assert TICKETS[60018]["resolution_notes"].startswith("Replaced the toner")
+
+            async def fix_resolution_note_alone_and_unchanged_are_handled():
+                ticket = TICKETS[60018]
+                ticket["resolution_notes"] = None
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60018, resolution_note="Reset the spooler")
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [{"resolution_notes": "Reset the spooler"}]
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60018, resolution_note="Reset the spooler ")  # same text
+                assert r["changed"] is False and not since(mark, FS, "PUT"), r
+                is_error, r = await fix(ticket_id=60018, resolution_note="reset the spooler")  # only the capital differs
+                assert r["changed"] is True and len(since(mark, FS, "PUT")) == 1, r
+
+            async def fix_long_resolution_note_is_shortened_in_the_report_only():
+                text = "word " * 60
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60014, resolution_note=text)
+                assert since(mark, FS, "PUT")[0]["body"]["resolution_notes"] == text.strip()
+                assert r["changes"]["resolution_note"]["to"].endswith("...") and len(r["changes"]["resolution_note"]["to"]) == 60, r
+
+            async def fix_refuses_a_blank_resolution_note_without_a_call():
+                for blank in ["", "   ", "\n"]:
+                    mark = len(outbound)
+                    is_error, r = await fix(ticket_id=60018, resolution_note=blank)
+                    assert is_error or "error" in r, (blank, r)
+                    assert not since(mark, FS), "Freshservice was called for a blank resolution note"
+
+            async def fix_reports_a_resolution_note_freshservice_did_not_save():
+                is_error, r = await fix(ticket_id=60019, resolution_note="Fixed it")
+                assert "did not save resolution_note as asked" in r["line"], r
 
             async def fix_without_assign_to_me_never_looks_up_the_agent():
                 mark = len(outbound)
@@ -971,6 +1017,11 @@ async def mcp_tests(results):
                 fix_assign_does_nothing_when_already_mine,
                 fix_changes_nothing_when_it_cannot_tell_who_you_are,
                 fix_without_assign_to_me_never_looks_up_the_agent,
+                fix_resolves_with_a_resolution_note,
+                fix_resolution_note_alone_and_unchanged_are_handled,
+                fix_long_resolution_note_is_shortened_in_the_report_only,
+                fix_refuses_a_blank_resolution_note_without_a_call,
+                fix_reports_a_resolution_note_freshservice_did_not_save,
                 full_output_is_unchanged_by_default,
                 compact_list_records_have_only_the_listed_fields,
                 compact_page_of_30_is_small,
