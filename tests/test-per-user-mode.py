@@ -232,7 +232,10 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and len(parts) == 4:
             if ticket is None:
                 return httpx.Response(404, json={"message": "not found"})
-            return httpx.Response(200, json={"ticket": {k: v for k, v in ticket.items() if k != "tasks"}})
+            shown = {k: v for k, v in ticket.items() if k != "tasks"}
+            if request.url.params.get("include") == "requester":  # only when asked, as Freshservice does
+                shown["requester"] = {"id": 4711, "name": "Pat Example", "email": "pat.example@example.com"}
+            return httpx.Response(200, json={"ticket": shown})
         if request.method == "GET" and parts[-1] == "tasks":
             # Report which key was used by label, never the key itself, so the
             # result can be asserted on without the key showing up in logs.
@@ -870,6 +873,17 @@ async def mcp_tests(results):
                 is_error, r = await fix(ticket_id=60022, location="Seattle")
                 assert "did not save location as asked" in r["line"], r
 
+            async def ticket_has_no_requester_details_unless_asked():
+                r = await tool("get_ticket_by_id", ticket_id=60008)
+                assert "requester" not in r["ticket"], r["ticket"].keys()
+
+            async def ticket_can_carry_the_requesters_name_and_email():
+                r = await tool("get_ticket_by_id", ticket_id=60008, include_requester=True)
+                assert r["ticket"]["requester"] == {"id": 4711, "name": "Pat Example", "email": "pat.example@example.com"}, r["ticket"].get("requester")
+                with compact():
+                    c = await tool("get_ticket_by_id", ticket_id=60008, include_requester=True)
+                assert "description" not in c["ticket"] and c["ticket"]["requester"]["email"] == "pat.example@example.com", c["ticket"].keys()
+
             async def fix_without_assign_to_me_never_looks_up_the_agent():
                 mark = len(outbound)
                 await fix(ticket_id=60013, status="Work In Progress")
@@ -1117,6 +1131,8 @@ async def mcp_tests(results):
                 fix_long_resolution_note_is_shortened_in_the_report_only,
                 fix_refuses_a_blank_resolution_note_without_a_call,
                 fix_reports_a_resolution_note_freshservice_did_not_save,
+                ticket_has_no_requester_details_unless_asked,
+                ticket_can_carry_the_requesters_name_and_email,
                 fix_sets_location_by_name_across_pages,
                 fix_sets_location_by_id_without_a_lookup,
                 fix_location_name_must_match_one_location_exactly,

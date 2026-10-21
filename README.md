@@ -342,7 +342,7 @@ registered on the OAuth client before it can authenticate at all.
 | `get_tickets` | List tickets with pagination |
 | `filter_tickets` | Filter tickets by query |
 | `search_tickets` | Text search within a date window, done on the server — see [Text Search](#text-search) |
-| `get_ticket_by_id` | Get a single ticket by ID |
+| `get_ticket_by_id` | Get a single ticket by ID. `include_requester=true` also returns the requester's name and email under `ticket.requester` (a ticket only carries `requester_id`), using Freshservice's `?include=requester`, so it works for keys that can't browse the Requesters module |
 
 ### Ticket Conversations
 | Tool | Description |

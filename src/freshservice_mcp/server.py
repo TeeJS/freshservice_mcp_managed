@@ -841,14 +841,18 @@ async def delete_ticket(ticket_id: int) -> str:
     
 #GET TICKET BY ID
 @allowed_tool(structured_output=False)
-async def get_ticket_by_id(ticket_id:int) -> Dict[str, Any]:
+async def get_ticket_by_id(ticket_id:int, include_requester: bool = False) -> Dict[str, Any]:
     """Get a ticket in Freshservice. With compact output the HTML copy of the
-    description is left out; description_text (the plain text) stays."""
+    description is left out; description_text (the plain text) stays. A ticket
+    only carries requester_id; include_requester=true also returns the
+    requester's name and email under ticket.requester, which is how to find out
+    who raised a ticket."""
     url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}"
     headers = get_auth_headers()
+    params = {"include": "requester"} if include_requester else None
 
     async with httpx.AsyncClient() as client:
-        response = await client.get(url,headers=headers)
+        response = await client.get(url, headers=headers, params=params)
         payload = response.json()
         if isinstance(payload, dict) and isinstance(payload.get("ticket"), dict):
             return {**payload, "ticket": _without_html(payload["ticket"], "description")}
