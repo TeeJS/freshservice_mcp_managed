@@ -89,7 +89,22 @@ TICKETS = {
     60008: {**term_ticket("Laptop fan noise", [], category="Hardware", sub_category="Laptop"),
             "description": "<div><b>Hello</b><br>fan noise</div>", "description_text": "Hello fan noise",
             "custom_fields": {"lf_location": 1}, "attachments": []},
+    # The status and category tool: each test that changes a ticket uses its own.
+    60009: {**term_ticket("Monitor flicker", [], category="Hardware", sub_category="Monitor"), "status": 2, "item_category": "Dell"},
+    60010: {**term_ticket("Printer driver", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None},
+    60011: {**term_ticket("Cannot save", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None,
+            "rejects_update": True},
+    60012: {**term_ticket("Ignores status", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None,
+            "ignores_status": True},
+    60013: {**term_ticket("No category yet", [], category=None, sub_category=None), "status": 2, "item_category": None},
+    # Assignment tests. "Me" depends on the key: see AGENT_IDS.
+    60014: {**term_ticket("Unassigned", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None, "responder_id": None},
+    60015: {**term_ticket("Someone else's", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None, "responder_id": 777},
+    60016: {**term_ticket("Already mine", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None, "responder_id": 5001},
+    60017: {**term_ticket("Agent lookup fails", [], category="Hardware", sub_category="Printer"), "status": 2, "item_category": None, "responder_id": None},
 }
+AGENT_IDS = {KEY_A: 5001, KEY_B: 5002}  # the Freshservice agent each key belongs to
+agent_lookup_fails = {"on": False}      # when on, /agents/me answers 403
 
 
 def list_ticket(i):
@@ -169,6 +184,11 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
     if host == "example.freshservice.com":
         if auth not in (basic(KEY_A), basic(KEY_B)):
             return httpx.Response(401, json={"message": "invalid credentials"})
+        if request.method == "GET" and request.url.path == "/api/v2/agents/me":
+            if agent_lookup_fails["on"]:
+                return httpx.Response(403, json={"code": "access_denied"})
+            key = KEY_A if auth == basic(KEY_A) else KEY_B
+            return httpx.Response(200, json={"agent": {"id": AGENT_IDS[key], "first_name": "Test"}})
         if request.method == "GET" and request.url.path == "/api/v2/tickets/filter":
             query = request.url.params.get("query", "").strip('"')
             page = int(request.url.params.get("page", "1"))
@@ -203,6 +223,16 @@ async def fake_upstreams(request: httpx.Request) -> httpx.Response:
             saved_private = body.get("private", False) and not ticket.get("forces_public")
             return httpx.Response(201, json={"conversation": {
                 "id": 9000 + len(outbound), "private": saved_private, "body": body["body"], "ticket_id": int(parts[3])}})
+        if request.method == "PUT" and len(parts) == 4:
+            if ticket is None:
+                return httpx.Response(404, json={"message": "not found"})
+            if ticket.get("rejects_update"):
+                return httpx.Response(400, json={"description": "Validation failed", "errors": [
+                    {"field": "sub_category", "message": "Invalid value", "code": "invalid_value"}]})
+            for field, value in body.items():
+                if not (field == "status" and ticket.get("ignores_status")):
+                    ticket[field] = value
+            return httpx.Response(200, json={"ticket": {k: v for k, v in ticket.items() if k != "tasks"}})
         if request.method == "PUT" and len(parts) == 6 and parts[4] == "tasks":
             task_id = int(parts[5])
             for task in (ticket or {}).get("tasks", []):
@@ -241,7 +271,8 @@ from mcp import types  # noqa: E402
 
 from freshservice_mcp import per_user, server  # noqa: E402
 
-EXPECTED_TOOLS = server.READONLY_TOOLS | {"update_ticket_task_status", "complete_term_tasks", "create_ticket_note"}
+EXPECTED_TOOLS = server.READONLY_TOOLS | {
+    "update_ticket_task_status", "complete_term_tasks", "create_ticket_note", "update_ticket_status_category"}
 APP = server.build_per_user_app(OWUI_URL)
 
 
@@ -304,7 +335,7 @@ async def mcp_tests(results):
             async def healthz_needs_no_token():
                 r = await client.get("/healthz")
                 assert r.status_code == 200, r.text
-                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 27, "output": "full"}, r.json()
+                assert r.json() == {"status": "ok", "mode": "per-user", "tools": 28, "output": "full"}, r.json()
 
             async def tool_list_is_exactly_the_per_user_tools():
                 result = await mcp_request(client, None, "tools/list")
@@ -556,6 +587,153 @@ async def mcp_tests(results):
                 is_error, r = await note(ticket_id=60007, body="should be private")
                 assert "saved it as PUBLIC, not as asked" in r["line"], r
 
+            # --- update_ticket_status_category ---
+            async def fix(**arguments):
+                is_error, text = await call_tool(client, "tok-a", "update_ticket_status_category", arguments)
+                return is_error, (text if is_error else json.loads(text))
+
+            async def fix_status_sends_only_the_status_code():
+                steps = [("Work In Progress", 9), ("On Hold", 8), ("Pending Vendor", 7), ("Pending Approval", 10),
+                         ("Pending Customer Response", 6), ("Resolved", 4), ("Open", 2)]
+                for (name, code), before in zip(steps, ["Open"] + [n for n, _ in steps]):
+                    mark = len(outbound)
+                    is_error, r = await fix(ticket_id=60009, status=name)
+                    assert not is_error, r
+                    puts = since(mark, FS, "PUT")
+                    assert [(p["path"], p["body"], p["auth"]) for p in puts] == [
+                        ("/api/v2/tickets/60009", {"status": code}, basic(KEY_A))], puts
+                    assert r["changes"] == {"status": {"from": before, "to": name}}, r
+                    assert r["line"] == f"Updated [Ticket #INC-60009]({URL}/60009): status {before} to {name}.", r
+
+            async def fix_category_path_sends_what_was_given():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60009, category="Software", sub_category="Office", item_category="Excel")
+                assert not is_error, r
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [
+                    {"category": "Software", "sub_category": "Office", "item_category": "Excel"}]
+                assert r["changes"]["category"] == {"from": "Hardware", "to": "Software"}, r
+                assert r["changes"]["item_category"] == {"from": "Dell", "to": "Excel"}, r
+                assert (TICKETS[60009]["category"], TICKETS[60009]["sub_category"]) == ("Software", "Office")
+
+            async def fix_changes_a_lower_level_alone():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60010, sub_category="Scanner")
+                assert not is_error, r
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [{"sub_category": "Scanner"}]
+                assert TICKETS[60010]["category"] == "Hardware", "category was touched"
+
+            async def fix_sets_category_on_a_ticket_with_none():
+                is_error, r = await fix(ticket_id=60013, category="Software")
+                assert not is_error and r["changes"] == {"category": {"from": "(none)", "to": "Software"}}, r
+
+            async def fix_changes_status_and_category_in_one_call():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60010, status="On Hold", category="Software", sub_category="Office")
+                assert not is_error, r
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [
+                    {"category": "Software", "sub_category": "Office", "status": 8}]
+
+            async def fix_refuses_a_category_without_its_sub_levels():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60012, category="Software")
+                assert "sub_category" in r["error"] and "Nothing was changed" in r["error"], r
+                is_error, r = await fix(ticket_id=60012, category="Software", sub_category="Office")  # no item on this ticket: fine
+                assert not is_error and "error" not in r, r
+                before = len(since(mark, FS, "PUT"))
+                is_error, r = await fix(ticket_id=60009, sub_category="Printer")  # the ticket has an item_category
+                assert "item_category" in r["error"], r
+                assert len(since(mark, FS, "PUT")) == before, "a PUT went out for a refused change"
+
+            async def fix_does_nothing_when_nothing_differs():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60013, category="software", status="Open")
+                assert r["changed"] is False and "Nothing was changed" in r["line"], r
+                assert not since(mark, FS, "PUT")
+
+            async def fix_refuses_bad_input_without_a_call():
+                bad = [dict(ticket_id=60010), dict(ticket_id=60010, category="  "), dict(ticket_id=60010, sub_category=""),
+                       dict(ticket_id=60010, status="in progress"), dict(ticket_id=60010, status="done"),
+                       dict(ticket_id=60010, status=3), dict(ticket_id=60010, status=""),
+                       dict(ticket_id=60010, status="Closed"), dict(ticket_id=60010, status="Pending")]  # not in the agent dropdown
+                for arguments in bad:
+                    mark = len(outbound)
+                    is_error, r = await fix(**arguments)
+                    assert is_error or "error" in r, (arguments, r)
+                    assert not since(mark, FS), f"Freshservice was called for {arguments}"
+
+            async def fix_refuses_a_missing_ticket():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=99999, status="On Hold")
+                assert "Couldn't read ticket 99999" in r["error"], r
+                assert not since(mark, FS, "PUT")
+
+            async def fix_passes_freshservice_errors_on_and_changes_nothing():
+                is_error, r = await fix(ticket_id=60011, sub_category="Scanner")
+                assert "Failed to update" in r["error"] and r["details"]["errors"][0]["field"] == "sub_category", r
+                assert TICKETS[60011]["sub_category"] == "Printer"
+
+            async def fix_reports_what_freshservice_actually_saved():
+                is_error, r = await fix(ticket_id=60012, status="Resolved")
+                assert "did not save status as asked" in r["line"], r
+
+            async def fix_has_no_way_to_write_other_fields():
+                mark = len(outbound)
+                await fix(ticket_id=60010, status="Open", priority=4, responder_id=1)
+                put_bodies = [p["body"] for p in since(mark, FS, "PUT")]
+                assert all(set(b) <= {"status", "category", "sub_category", "item_category"} for b in put_bodies), put_bodies
+
+            async def fix_assigns_to_the_key_owner_and_nobody_else():
+                for token, key, ticket_id in [("tok-a", KEY_A, 60014), ("tok-b", KEY_B, 60015)]:
+                    mark = len(outbound)
+                    is_error, text = await call_tool(client, token, "update_ticket_status_category",
+                                                     {"ticket_id": ticket_id, "assign_to_me": True, "responder_id": 1})
+                    r = json.loads(text)
+                    me = AGENT_IDS[key]
+                    puts = since(mark, FS, "PUT")
+                    assert [(p["path"], p["body"], p["auth"]) for p in puts] == [
+                        (f"/api/v2/tickets/{ticket_id}", {"responder_id": me}, basic(key))], puts
+                    assert [o["path"] for o in since(mark, FS, "GET")][0] == f"/api/v2/tickets/{ticket_id}"
+                    assert "/api/v2/agents/me" in [o["path"] for o in since(mark, FS, "GET")]
+                    assert r["changes"]["assigned_to"]["to"] == "you", r
+                assert TICKETS[60014]["responder_id"] == 5001 and TICKETS[60015]["responder_id"] == 5002
+
+            async def fix_reports_who_it_took_the_ticket_from():
+                is_error, r = await fix(ticket_id=60017, assign_to_me=True)  # unassigned
+                assert r["changes"] == {"assigned_to": {"from": "(unassigned)", "to": "you"}}, r
+                assert r["line"].endswith("assigned_to (unassigned) to you."), r
+                TICKETS[60017]["responder_id"] = 888
+                is_error, r = await fix(ticket_id=60017, assign_to_me=True)  # someone else's
+                assert r["changes"] == {"assigned_to": {"from": "agent 888", "to": "you"}}, r
+
+            async def fix_assignment_can_ride_with_status_and_category():
+                mark = len(outbound)
+                TICKETS[60014]["responder_id"] = None
+                is_error, r = await fix(ticket_id=60014, status="Resolved", category="Software", sub_category="Office", assign_to_me=True)
+                assert not is_error, r
+                assert [p["body"] for p in since(mark, FS, "PUT")] == [
+                    {"category": "Software", "sub_category": "Office", "status": 4, "responder_id": 5001}]
+
+            async def fix_assign_does_nothing_when_already_mine():
+                mark = len(outbound)
+                is_error, r = await fix(ticket_id=60016, assign_to_me=True)
+                assert r["changed"] is False, r
+                assert not since(mark, FS, "PUT")
+
+            async def fix_changes_nothing_when_it_cannot_tell_who_you_are():
+                mark = len(outbound)
+                agent_lookup_fails["on"] = True
+                try:
+                    is_error, r = await fix(ticket_id=60013, status="On Hold", assign_to_me=True)
+                finally:
+                    agent_lookup_fails["on"] = False
+                assert "Couldn't tell which Freshservice agent you are" in r["error"] and "Nothing was changed" in r["error"], r
+                assert not since(mark, FS, "PUT"), "the status was changed though the assignment could not be"
+
+            async def fix_without_assign_to_me_never_looks_up_the_agent():
+                mark = len(outbound)
+                await fix(ticket_id=60013, status="Work In Progress")
+                assert "/api/v2/agents/me" not in [o["path"] for o in since(mark, FS)]
+
             async def term_rejects_a_non_numeric_employee_id():
                 mark = len(outbound)
                 is_error, r = await term(ticket_id=60005, employee_id="abc", systems_without_account=["SAP"])
@@ -775,6 +953,24 @@ async def mcp_tests(results):
                 note_text_is_escaped_and_keeps_line_breaks,
                 note_refuses_empty_text_and_missing_tickets,
                 note_reports_what_freshservice_actually_saved,
+                fix_status_sends_only_the_status_code,
+                fix_category_path_sends_what_was_given,
+                fix_changes_a_lower_level_alone,
+                fix_sets_category_on_a_ticket_with_none,
+                fix_changes_status_and_category_in_one_call,
+                fix_refuses_a_category_without_its_sub_levels,
+                fix_does_nothing_when_nothing_differs,
+                fix_refuses_bad_input_without_a_call,
+                fix_refuses_a_missing_ticket,
+                fix_passes_freshservice_errors_on_and_changes_nothing,
+                fix_reports_what_freshservice_actually_saved,
+                fix_has_no_way_to_write_other_fields,
+                fix_assigns_to_the_key_owner_and_nobody_else,
+                fix_reports_who_it_took_the_ticket_from,
+                fix_assignment_can_ride_with_status_and_category,
+                fix_assign_does_nothing_when_already_mine,
+                fix_changes_nothing_when_it_cannot_tell_who_you_are,
+                fix_without_assign_to_me_never_looks_up_the_agent,
                 full_output_is_unchanged_by_default,
                 compact_list_records_have_only_the_listed_fields,
                 compact_page_of_30_is_small,
@@ -845,6 +1041,7 @@ def test_shared_mode_tool_list_is_unchanged():
     assert "update_ticket_task_status" not in registered
     assert "complete_term_tasks" not in registered
     assert "create_ticket_note" not in registered
+    assert "update_ticket_status_category" not in registered
 
 
 def test_shared_mode_still_uses_the_shared_key():

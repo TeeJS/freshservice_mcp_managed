@@ -388,6 +388,8 @@ PER_USER_WRITE_TOOLS = {
     # Ticket Tasks
     "update_ticket_task_status",
     "complete_term_tasks",
+    # Tickets
+    "update_ticket_status_category",
     # Ticket Conversations
     "create_ticket_note",
 }
@@ -2177,6 +2179,131 @@ async def update_ticket_task_status(ticket_id: int, task_id: int, status: Litera
                 return {"error": f"Failed to update ticket task: {str(e)}"}
         except Exception as e:
             return {"error": f"An unexpected error occurred: {str(e)}"}
+
+#UPDATE TICKET STATUS AND CATEGORY
+# The only ticket fields this tool writes. update_ticket, which takes any field,
+# stays disabled; this is its narrow stand-in for per-user mode.
+# This tenant's statuses, from /api/v2/ticket_form_fields. The tool offers the
+# ones agents see in the status dropdown; Pending (3) and Closed (5) exist but
+# aren't in it, so they are only named here to describe a ticket's current status.
+TICKET_STATUS_CODES = {
+    "Open": 2,
+    "Resolved": 4,
+    "Pending Approval": 10,
+    "Pending Customer Response": 6,
+    "On Hold": 8,
+    "Pending Vendor": 7,
+    "Work In Progress": 9,
+}
+TICKET_STATUS_NAMES = {**{code: name for name, code in TICKET_STATUS_CODES.items()}, 3: "Pending", 5: "Closed"}
+
+def _same_text(a: Any, b: Any) -> bool:
+    return str(a or "").strip().casefold() == str(b or "").strip().casefold()
+
+def _ticket_value_text(field: str, value: Any, me: Optional[int] = None) -> str:
+    if field == "responder_id":
+        if value is None:
+            return "(unassigned)"
+        return "you" if value == me else f"agent {value}"
+    if value in (None, ""):
+        return "(none)"
+    if field == "status":
+        return TICKET_STATUS_NAMES.get(value, f"status {value}")
+    return str(value)
+
+async def _my_agent_id(client: httpx.AsyncClient, headers: Dict[str, str]) -> int:
+    """The Freshservice agent id of whoever owns the API key in use."""
+    response = await client.get(f"https://{FRESHSERVICE_DOMAIN}/api/v2/agents/me", headers=headers)
+    response.raise_for_status()
+    body = response.json()
+    agent_id = (body.get("agent") or body).get("id")
+    if not isinstance(agent_id, int) or isinstance(agent_id, bool):
+        raise ValueError("the response has no agent id")
+    return agent_id
+
+@allowed_tool()
+async def update_ticket_status_category(
+    ticket_id: int,
+    status: Optional[Literal["Open", "Resolved", "Pending Approval", "Pending Customer Response", "On Hold", "Pending Vendor", "Work In Progress"]] = None,
+    category: Optional[str] = None,
+    sub_category: Optional[str] = None,
+    item_category: Optional[str] = None,
+    assign_to_me: bool = False,
+) -> Dict[str, Any]:
+    """Change a ticket's status, its category, sub_category and item_category, and/or assign it to the person asking (assign_to_me=true sets "Assigned to" to them; it can't assign anyone else). Only call this when the user explicitly asks for that change. Give only what should change. Changing category means also giving the sub_category (and item_category when the ticket has one) it belongs under; the tool refuses otherwise. Changes nothing else on the ticket. Print the returned line."""
+    wanted = {
+        field: value.strip()
+        for field, value in (("category", category), ("sub_category", sub_category), ("item_category", item_category))
+        if value is not None
+    }
+    if any(not value for value in wanted.values()):
+        return {"error": "category, sub_category and item_category can't be blank. Nothing was changed."}
+    if status is not None and status not in TICKET_STATUS_CODES:
+        return {"error": f"status must be one of: {', '.join(TICKET_STATUS_CODES)}. Nothing was changed."}
+    if status is None and not wanted and not assign_to_me:
+        return {"error": "Nothing to change: give a status, a category or assign_to_me. Nothing was changed."}
+
+    headers = get_auth_headers()
+    url = f"https://{FRESHSERVICE_DOMAIN}/api/v2/tickets/{ticket_id}"
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            current = response.json()["ticket"]
+        except Exception as e:
+            return {"error": f"Couldn't read ticket {ticket_id}: {str(e)}. Nothing was changed."}
+        ticket_link = _ticket_link(ticket_id, current.get("type"))
+
+        payload: Dict[str, Any] = dict(wanted)
+        differs: Dict[str, Any] = {field: value for field, value in wanted.items() if not _same_text(value, current.get(field))}
+        if status is not None:
+            payload["status"] = TICKET_STATUS_CODES[status]
+            if current.get("status") != payload["status"]:
+                differs["status"] = payload["status"]
+        my_id: Optional[int] = None
+        if assign_to_me:
+            try:
+                my_id = await _my_agent_id(client, headers)
+            except Exception as e:
+                return {"error": f"Couldn't tell which Freshservice agent you are: {str(e)}. Nothing was changed."}
+            payload["responder_id"] = my_id
+            if current.get("responder_id") != my_id:
+                differs["responder_id"] = my_id
+        if not differs:
+            return {"changed": False, "line": f"{ticket_link} already has those values. Nothing was changed."}
+
+        # A category only fits with the levels under it. Without them the ticket
+        # would be left with a sub_category from the old category.
+        if "category" in differs and current.get("sub_category") and "sub_category" not in wanted:
+            return {"error": f"{ticket_link} is in sub_category '{current['sub_category']}' of its current category. Say which sub_category the new category uses. Nothing was changed."}
+        if ("category" in differs or "sub_category" in differs) and current.get("item_category") and "item_category" not in wanted:
+            return {"error": f"{ticket_link} has item_category '{current['item_category']}'. Say which item_category the new category/sub_category uses. Nothing was changed."}
+
+        try:
+            response = await client.put(url, headers=headers, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            try:
+                return {"error": f"Failed to update {ticket_link}: {str(e)}", "details": e.response.json()}
+            except Exception:
+                return {"error": f"Failed to update {ticket_link}: {str(e)}"}
+        except Exception as e:
+            return {"error": f"An unexpected error occurred: {str(e)}"}
+
+    saved = response.json().get("ticket") or {}
+    changes = {}
+    not_as_asked = []
+    for field in differs:
+        after = saved.get(field, payload[field])
+        label = "assigned_to" if field == "responder_id" else field
+        changes[label] = {"from": _ticket_value_text(field, current.get(field), my_id), "to": _ticket_value_text(field, after, my_id)}
+        if (after != payload[field]) if field in ("status", "responder_id") else not _same_text(after, payload[field]):
+            not_as_asked.append(label)
+    summary = "; ".join(f"{label} {change['from']} to {change['to']}" for label, change in changes.items())
+    line = f"Updated {ticket_link}: {summary}."
+    if not_as_asked:
+        line += f" Freshservice did not save {', '.join(not_as_asked)} as asked. Check it in Freshservice."
+    return {"changed": True, "changes": changes, "line": line}
 
 #COMPLETE TERM TASKS
 # The termination tasks this tool may complete, by system, matched by exact

@@ -188,9 +188,23 @@ never reaches Freshservice; whether a key is valid is left to Freshservice.
 4. Each user, once: in a chat, **Controls → Valves → Tools → Freshservice Key**,
    paste their Freshservice API key.
 
-It registers the read tools plus three write tools, **never** registered in
+It registers the read tools plus four write tools, **never** registered in
 `shared` mode:
 
+- `update_ticket_status_category`: changes a ticket's status (`Open`, `Resolved`,
+  `Pending Approval`, `Pending Customer Response`, `On Hold`, `Pending Vendor`,
+  `Work In Progress`: the statuses in the agent dropdown, with this tenant's IDs
+  hardcoded from `/api/v2/ticket_form_fields`) and/or its `category`,
+  `sub_category` and `item_category`, and/or "Assigned to", and nothing else on the
+  ticket. It cannot set `Closed` or `Pending`, which aren't in that dropdown.
+  `assign_to_me=true` assigns the ticket to the owner of the caller's own API key
+  (found with `/api/v2/agents/me`); there is no way to name another agent, and the
+  result says who the ticket was taken from. If the agent lookup fails, nothing is
+  changed. It reads the ticket first, does nothing when the
+  values already match, and refuses a new category without the sub_category (and
+  item_category, if the ticket has one) that belongs under it. It reports what
+  changed (`from` / `to`) and says so when Freshservice saved something other
+  than what was asked.
 - `update_ticket_task_status`: sets a ticket task to `open` or `completed`,
   nothing else.
 - `complete_term_tasks`: on an HR **Separation** ticket, completes the
